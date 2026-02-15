@@ -1,12 +1,8 @@
 package randomizer
 
-import (
-	"bytes"
-	"strings"
-)
-
 const (
 	deci     string = "0123456789"
+	octi     string = "01234567"
 	lhexdict string = "0123456789abcdef"
 	uhexdict string = "0123456789ABCDEF"
 )
@@ -15,25 +11,98 @@ type word struct{}
 
 var Word word
 
+type wordRNG struct {
+	state uint64
+}
+
+// newWordRNG seeds a local fast PRNG stream once per request.
+func newWordRNG() wordRNG {
+	return wordRNG{state: DefaultHashPool.Sum64()}
+}
+
+// next64 returns a uniformly mixed 64-bit value using SplitMix64.
+func (r *wordRNG) next64() uint64 {
+	r.state += 0x9e3779b97f4a7c15
+	z := r.state
+	z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9
+	z = (z ^ (z >> 27)) * 0x94d049bb133111eb
+	return z ^ (z >> 31)
+}
+
+func fillDecimalNoRepeat(out []byte, rng *wordRNG) {
+	// Largest multiple of 10 below 256 to remove modulo bias.
+	const cutoff = 250
+
+	var (
+		raw       uint64
+		rawBytes  uint8
+		last      byte
+		hasLast   bool
+		outCursor int
+	)
+	for outCursor < len(out) {
+		if rawBytes == 0 {
+			raw = rng.next64()
+			rawBytes = 8
+		}
+
+		v := byte(raw)
+		raw >>= 8
+		rawBytes--
+		if v >= cutoff {
+			continue
+		}
+
+		c := deci[v%10]
+		if hasLast && c == last {
+			continue
+		}
+		out[outCursor] = c
+		last = c
+		hasLast = true
+		outCursor++
+	}
+}
+
+func fillPow2AlphabetNoRepeat(out []byte, dict string, bits uint8, rng *wordRNG) {
+	mask := uint64((1 << bits) - 1)
+
+	var (
+		raw       uint64
+		rawBits   uint8
+		last      byte
+		hasLast   bool
+		outCursor int
+	)
+	for outCursor < len(out) {
+		if rawBits < bits {
+			raw = rng.next64()
+			rawBits = 64
+		}
+
+		c := dict[raw&mask]
+		raw >>= bits
+		rawBits -= bits
+		if hasLast && c == last {
+			continue
+		}
+		out[outCursor] = c
+		last = c
+		hasLast = true
+		outCursor++
+	}
+}
+
 // Decimal generates a random numeric string of the specified length,
 // consisting of characters from "0123456789".
 func (word) Decimal(length int) string {
 	if length <= 0 {
 		return ""
 	}
-	var sb strings.Builder
-	sb.Grow(length)
-	for i, hash := 0, uint64(0); i < length; i++ {
-		if i&7 == 0 {
-			hash = DefaultHashPool.Sum64()
-			for j, digit := 0, uint64(0); j < 8 && (i+j) < length; j++ {
-				digit = (hash >> (j * 4)) % 10
-				sb.WriteByte(deci[digit])
-			}
-			i += 7
-		}
-	}
-	return sb.String()
+	out := make([]byte, length)
+	rng := newWordRNG()
+	fillDecimalNoRepeat(out, &rng)
+	return string(out)
 }
 
 // DecimalBytes generates a random numeric byte slice of the specified length,
@@ -42,19 +111,10 @@ func (word) DecimalBytes(length int) []byte {
 	if length <= 0 {
 		return nil
 	}
-	var bb bytes.Buffer
-	bb.Grow(length)
-	for i, hash := 0, uint64(0); i < length; i++ {
-		if i&7 == 0 {
-			hash = DefaultHashPool.Sum64()
-			for j, digit := 0, uint64(0); j < 8 && (i+j) < length; j++ {
-				digit = (hash >> (j * 4)) % 10
-				bb.WriteByte(deci[digit])
-			}
-			i += 7
-		}
-	}
-	return bb.Bytes()
+	out := make([]byte, length)
+	rng := newWordRNG()
+	fillDecimalNoRepeat(out, &rng)
+	return out
 }
 
 // Hex generates a random hexadecimal string of the specified length.
@@ -64,23 +124,14 @@ func (word) Hex(length int, uppercase bool) string {
 	if length <= 0 {
 		return ""
 	}
-	var sb strings.Builder
-	sb.Grow(length)
-	for i, hash := 0, uint64(0); i < length; i++ {
-		if i&7 == 0 {
-			hash = DefaultHashPool.Sum64()
-			for j, digit := 0, uint64(0); j < 8 && (i+j) < length; j++ {
-				digit = (hash >> (j * 4)) & 0x0F
-				if uppercase {
-					sb.WriteByte(uhexdict[digit])
-					continue
-				}
-				sb.WriteByte(lhexdict[digit])
-			}
-			i += 7
-		}
+	dict := lhexdict
+	if uppercase {
+		dict = uhexdict
 	}
-	return sb.String()
+	out := make([]byte, length)
+	rng := newWordRNG()
+	fillPow2AlphabetNoRepeat(out, dict, 4, &rng)
+	return string(out)
 }
 
 // HexBytes generates a random hexadecimal byte slice of the specified length.
@@ -90,23 +141,14 @@ func (word) HexBytes(length int, uppercase bool) []byte {
 	if length <= 0 {
 		return nil
 	}
-	var bb bytes.Buffer
-	bb.Grow(length)
-	for i, hash := 0, uint64(0); i < length; i++ {
-		if i&7 == 0 {
-			hash = DefaultHashPool.Sum64()
-			for j, digit := 0, uint64(0); j < 8 && (i+j) < length; j++ {
-				digit = (hash >> (j * 4)) & 0x0F
-				if uppercase {
-					bb.WriteByte(uhexdict[digit])
-					continue
-				}
-				bb.WriteByte(lhexdict[digit])
-			}
-			i += 7
-		}
+	dict := lhexdict
+	if uppercase {
+		dict = uhexdict
 	}
-	return bb.Bytes()
+	out := make([]byte, length)
+	rng := newWordRNG()
+	fillPow2AlphabetNoRepeat(out, dict, 4, &rng)
+	return out
 }
 
 // Octal generates a random octal string of the specified length,
@@ -115,19 +157,10 @@ func (word) Octal(length int) string {
 	if length <= 0 {
 		return ""
 	}
-	var sb strings.Builder
-	sb.Grow(length)
-	for i, hash := 0, uint64(0); i < length; i++ {
-		if i&7 == 0 {
-			hash = DefaultHashPool.Sum64()
-			for j, digit := 0, uint64(0); j < 8 && (i+j) < length; j++ {
-				digit = (hash >> (j * 3)) & 0x7
-				sb.WriteByte(deci[digit])
-			}
-			i += 7
-		}
-	}
-	return sb.String()
+	out := make([]byte, length)
+	rng := newWordRNG()
+	fillPow2AlphabetNoRepeat(out, octi, 3, &rng)
+	return string(out)
 }
 
 // OctalBytes generates a random octal byte slice of the specified length,
@@ -136,17 +169,8 @@ func (word) OctalBytes(length int) []byte {
 	if length <= 0 {
 		return nil
 	}
-	var bb bytes.Buffer
-	bb.Grow(length)
-	for i, hash := 0, uint64(0); i < length; i++ {
-		if i&7 == 0 {
-			hash = DefaultHashPool.Sum64()
-			for j, digit := 0, uint64(0); j < 8 && (i+j) < length; j++ {
-				digit = (hash >> (j * 3)) & 0x7
-				bb.WriteByte(deci[digit])
-			}
-			i += 7
-		}
-	}
-	return bb.Bytes()
+	out := make([]byte, length)
+	rng := newWordRNG()
+	fillPow2AlphabetNoRepeat(out, octi, 3, &rng)
+	return out
 }

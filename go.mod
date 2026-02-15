@@ -1,3 +1,3 @@
 module github.com/colduction/randomizer
 
-go 1.23.2
+go 1.26.0
