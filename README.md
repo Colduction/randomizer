@@ -31,7 +31,7 @@ It covers numbers, formatted strings, and network addresses with a lock-free def
 
 - **Numbers** — random integers (signed & unsigned, any width), and floats in `[0, 1)`
 - **Range sampling** — unbiased interval generation with Lemire's algorithm (no division in the hot path)
-- **Strings** — decimal, hexadecimal, and octal strings with no adjacent-duplicate characters
+- **Strings** — decimal, hexadecimal, octal, and custom-dictionary strings with no adjacent-duplicate characters
 - **Network** — random IPv4, IPv6 (unicast & multicast), MAC addresses, ports, VLAN IDs, UUIDs, CIDR blocks, and EUI-64 identifiers
 - **Configurable providers** — use the default generator, `math/rand`, `crypto/rand`, or a custom `Provider`
 - **Lock-free** — the primary PRNG uses an atomic counter; no mutexes on the hot path
@@ -78,6 +78,9 @@ func main() {
 
     // Random decimal string of length 12
     fmt.Println(randomizer.Word.Decimal(12))
+
+    // Random custom string using the dictionary length as output length
+    fmt.Println(randomizer.Word.Custom("ABCDEFGH"))
 
     // Random IPv4 address
     fmt.Println(randomizer.Network.IPv4Addr())
@@ -205,7 +208,44 @@ Same as `Octal` but returns `[]byte`.
 b := randomizer.Word.OctalBytes(8)
 ```
 
-> All functions return `""` / `nil` for `length <= 0`.
+#### `Word.Custom(dictionary string) string`
+
+Generates a random string from `dictionary`. The output length equals `len(dictionary)`.
+Sampling is byte-oriented; repeated bytes in `dictionary` increase their selection weight.
+
+```go
+s := randomizer.Word.Custom("ABCDEFGH")
+```
+
+Returns `""` when `dictionary` is empty, or when every byte is identical and `len(dictionary) > 1`.
+
+#### `Word.CustomFromBytes(dictionary []byte) string`
+
+Same as `Custom` but reads the dictionary from a `[]byte`.
+
+```go
+s := randomizer.Word.CustomFromBytes([]byte("ABCDEFGH"))
+```
+
+#### `Word.CustomBytes(dictionary []byte) []byte`
+
+Same as `CustomFromBytes` but returns `[]byte`.
+
+```go
+b := randomizer.Word.CustomBytes([]byte("ABCDEFGH"))
+```
+
+Returns `nil` when `dictionary` is empty, or when every byte is identical and `len(dictionary) > 1`.
+
+#### `Word.CustomBytesFromString(dictionary string) []byte`
+
+Same as `Custom` but returns `[]byte`.
+
+```go
+b := randomizer.Word.CustomBytesFromString("ABCDEFGH")
+```
+
+> Length-based functions return `""` / `nil` for `length <= 0`. Custom-dictionary functions return `""` / `nil` when the dictionary cannot produce output without adjacent duplicates.
 
 ---
 
