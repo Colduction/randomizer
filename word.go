@@ -85,43 +85,43 @@ func (word) OctalBytes(length int) []byte {
 	return out
 }
 
-// Custom returns a random string with the same length as dictionary, or an empty
-// string when dictionary cannot avoid adjacent duplicates.
-func (word) Custom(dictionary string) string {
-	out := customBytes(dictionary)
+// Custom returns a random string of the given length, or an empty string when
+// dictionary cannot avoid adjacent duplicates.
+func (word) Custom(dictionary string, length int) string {
+	out := customBytes(dictionary, length)
 	if len(out) == 0 {
 		return ""
 	}
 	return unsafe.String(unsafe.SliceData(out), len(out))
 }
 
-// CustomFromBytes returns a random string with the same length as dictionary, or
+// CustomFromBytes returns a random string of the given length, or
 // an empty string when dictionary cannot avoid adjacent duplicates.
-func (word) CustomFromBytes(dictionary []byte) string {
-	out := customBytes(dictionary)
+func (word) CustomFromBytes(dictionary []byte, length int) string {
+	out := customBytes(dictionary, length)
 	if len(out) == 0 {
 		return ""
 	}
 	return unsafe.String(unsafe.SliceData(out), len(out))
 }
 
-// CustomBytes returns a random byte slice with the same length as dictionary, or
+// CustomBytes returns a random byte slice of the given length, or
 // nil when dictionary cannot avoid adjacent duplicates.
-func (word) CustomBytes(dictionary []byte) []byte {
-	return customBytes(dictionary)
+func (word) CustomBytes(dictionary []byte, length int) []byte {
+	return customBytes(dictionary, length)
 }
 
-// CustomBytesFromString returns a random byte slice with the same length as
-// dictionary, or nil when dictionary cannot avoid adjacent duplicates.
-func (word) CustomBytesFromString(dictionary string) []byte {
-	return customBytes(dictionary)
+// CustomBytesFromString returns a random byte slice of the given length, or nil
+// when dictionary cannot avoid adjacent duplicates.
+func (word) CustomBytesFromString(dictionary string, length int) []byte {
+	return customBytes(dictionary, length)
 }
 
-func customBytes[B ~string | ~[]byte](dictionary B) []byte {
-	if len(dictionary) == 0 {
+func customBytes[B ~string | ~[]byte](dictionary B, length int) []byte {
+	if length <= 0 || len(dictionary) == 0 {
 		return nil
 	}
-	if len(dictionary) > 1 {
+	if length > 1 {
 		first := dictionary[0]
 		for i := 1; ; i++ {
 			if i == len(dictionary) {
@@ -132,7 +132,7 @@ func customBytes[B ~string | ~[]byte](dictionary B) []byte {
 			}
 		}
 	}
-	out := make([]byte, len(dictionary))
+	out := make([]byte, length)
 	fillAlphabetNoRepeat(out, dictionary, 0, currentProvider())
 	return out
 }

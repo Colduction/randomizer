@@ -79,8 +79,8 @@ func main() {
     // Random decimal string of length 12
     fmt.Println(randomizer.Word.Decimal(12))
 
-    // Random custom string using the dictionary length as output length
-    fmt.Println(randomizer.Word.Custom("ABCDEFGH"))
+    // Random custom string of length 12
+    fmt.Println(randomizer.Word.Custom("ABCDEFGH", 12))
 
     // Random IPv4 address
     fmt.Println(randomizer.Network.IPv4Addr())
@@ -208,41 +208,41 @@ Same as `Octal` but returns `[]byte`.
 b := randomizer.Word.OctalBytes(8)
 ```
 
-#### `Word.Custom(dictionary string) string`
+#### `Word.Custom(dictionary string, length int) string`
 
-Generates a random string from `dictionary`. The output length equals `len(dictionary)`.
+Generates a random string of the given length from `dictionary`.
 Sampling is byte-oriented; repeated bytes in `dictionary` increase their selection weight.
 
 ```go
-s := randomizer.Word.Custom("ABCDEFGH")
+s := randomizer.Word.Custom("ABCDEFGH", 12)
 ```
 
-Returns `""` when `dictionary` is empty, or when every byte is identical and `len(dictionary) > 1`.
+Returns `""` for `length <= 0`, when `dictionary` is empty, or when `length > 1` and every byte in `dictionary` is identical.
 
-#### `Word.CustomFromBytes(dictionary []byte) string`
+#### `Word.CustomFromBytes(dictionary []byte, length int) string`
 
 Same as `Custom` but reads the dictionary from a `[]byte`.
 
 ```go
-s := randomizer.Word.CustomFromBytes([]byte("ABCDEFGH"))
+s := randomizer.Word.CustomFromBytes([]byte("ABCDEFGH"), 12)
 ```
 
-#### `Word.CustomBytes(dictionary []byte) []byte`
+#### `Word.CustomBytes(dictionary []byte, length int) []byte`
 
 Same as `CustomFromBytes` but returns `[]byte`.
 
 ```go
-b := randomizer.Word.CustomBytes([]byte("ABCDEFGH"))
+b := randomizer.Word.CustomBytes([]byte("ABCDEFGH"), 12)
 ```
 
-Returns `nil` when `dictionary` is empty, or when every byte is identical and `len(dictionary) > 1`.
+Returns `nil` for `length <= 0`, when `dictionary` is empty, or when `length > 1` and every byte in `dictionary` is identical.
 
-#### `Word.CustomBytesFromString(dictionary string) []byte`
+#### `Word.CustomBytesFromString(dictionary string, length int) []byte`
 
 Same as `Custom` but returns `[]byte`.
 
 ```go
-b := randomizer.Word.CustomBytesFromString("ABCDEFGH")
+b := randomizer.Word.CustomBytesFromString("ABCDEFGH", 12)
 ```
 
 > Length-based functions return `""` / `nil` for `length <= 0`. Custom-dictionary functions return `""` / `nil` when the dictionary cannot produce output without adjacent duplicates.

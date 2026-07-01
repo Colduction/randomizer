@@ -171,6 +171,85 @@ func TestWordOctalOutput(t *testing.T) {
 	}
 }
 
+func TestWordCustomOutput(t *testing.T) {
+	const n = 4096
+	const dict = "AABCXYZ9"
+	allow := makeAlphabet(dict)
+
+	s := randomizer.Word.Custom(dict, n)
+	if len(s) != n {
+		t.Fatalf("Custom length = %d, want %d", len(s), n)
+	}
+	sb := []byte(s)
+	if !allInAlphabet(sb, allow) {
+		t.Fatal("Custom produced invalid character")
+	}
+	if hasAdjacentDuplicate(sb) {
+		t.Fatal("Custom produced adjacent duplicate character")
+	}
+
+	fromBytes := randomizer.Word.CustomFromBytes([]byte(dict), n)
+	if len(fromBytes) != n {
+		t.Fatalf("CustomFromBytes length = %d, want %d", len(fromBytes), n)
+	}
+	fromBytesBytes := []byte(fromBytes)
+	if !allInAlphabet(fromBytesBytes, allow) {
+		t.Fatal("CustomFromBytes produced invalid character")
+	}
+	if hasAdjacentDuplicate(fromBytesBytes) {
+		t.Fatal("CustomFromBytes produced adjacent duplicate character")
+	}
+
+	b := randomizer.Word.CustomBytes([]byte(dict), n)
+	if len(b) != n {
+		t.Fatalf("CustomBytes length = %d, want %d", len(b), n)
+	}
+	if !allInAlphabet(b, allow) {
+		t.Fatal("CustomBytes produced invalid character")
+	}
+	if hasAdjacentDuplicate(b) {
+		t.Fatal("CustomBytes produced adjacent duplicate character")
+	}
+
+	fromString := randomizer.Word.CustomBytesFromString(dict, n)
+	if len(fromString) != n {
+		t.Fatalf("CustomBytesFromString length = %d, want %d", len(fromString), n)
+	}
+	if !allInAlphabet(fromString, allow) {
+		t.Fatal("CustomBytesFromString produced invalid character")
+	}
+	if hasAdjacentDuplicate(fromString) {
+		t.Fatal("CustomBytesFromString produced adjacent duplicate character")
+	}
+}
+
+func TestWordCustomInvalidOutput(t *testing.T) {
+	if got := randomizer.Word.Custom("AB", 0); got != "" {
+		t.Fatalf("Custom zero length = %q, want empty string", got)
+	}
+	if got := randomizer.Word.Custom("", 1); got != "" {
+		t.Fatalf("Custom empty dictionary = %q, want empty string", got)
+	}
+	if got := randomizer.Word.Custom("AA", 2); got != "" {
+		t.Fatalf("Custom duplicate-only dictionary = %q, want empty string", got)
+	}
+	if got := randomizer.Word.Custom("AA", 1); len(got) != 1 || got[0] != 'A' {
+		t.Fatalf("Custom duplicate-only dictionary length 1 = %q, want %q", got, "A")
+	}
+	if got := randomizer.Word.CustomBytes([]byte("AB"), 0); got != nil {
+		t.Fatalf("CustomBytes zero length = %v, want nil", got)
+	}
+	if got := randomizer.Word.CustomBytes(nil, 1); got != nil {
+		t.Fatalf("CustomBytes nil dictionary = %v, want nil", got)
+	}
+	if got := randomizer.Word.CustomBytes([]byte("AA"), 2); got != nil {
+		t.Fatalf("CustomBytes duplicate-only dictionary = %v, want nil", got)
+	}
+	if got := randomizer.Word.CustomBytes([]byte("AA"), 1); len(got) != 1 || got[0] != 'A' {
+		t.Fatalf("CustomBytes duplicate-only dictionary length 1 = %v, want %v", got, []byte("A"))
+	}
+}
+
 func BenchmarkWordDecimal(b *testing.B) {
 	const n = 256
 	b.ReportAllocs()
