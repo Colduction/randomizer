@@ -1,49 +1,23 @@
 # randomizer-go
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/colduction/randomizer-go.svg)](https://pkg.go.dev/github.com/colduction/randomizer-go)
-[![Go Report Card](https://goreportcard.com/badge/github.com/colduction/randomizer-go)](https://goreportcard.com/report/github.com/colduction/randomizer-go)
 ![GitHub License](https://img.shields.io/github/license/Colduction/randomizer-go)
 
-**randomizer-go** is a fast, zero-allocation-friendly, and goroutine-safe random data generation library for Go.  
-It covers numbers, formatted strings, and network addresses with a lock-free default generator and configurable random providers.
-
----
-
-## Table of Contents
-
-- [Features](#features)
-- [Requirements](#requirements)
-- [Installation](#installation)
-- [Quick Start](#quick-start)
-- [API Reference](#api-reference)
-    - [Numbers](#numbers)
-    - [Strings](#strings)
-    - [Network](#network)
-    - [Providers](#providers)
-    - [HashPool (advanced)](#hashpool-advanced)
-- [Performance](#performance)
-- [Thread Safety](#thread-safety)
-- [License](#license)
-
----
+**randomizer-go** is a fast, allocation-aware, goroutine-safe random data generation library for Go.
+It covers numbers, byte/string alphabets, network values, network addresses, UUIDs, and configurable random providers.
 
 ## Features
 
-- **Numbers** — random integers (signed & unsigned, any width), and floats in `[0, 1)`
-- **Range sampling** — unbiased interval generation with Lemire's algorithm (no division in the hot path)
-- **Strings** — decimal, hexadecimal, octal, and custom-dictionary strings with no adjacent-duplicate characters
-- **Network** — random IPv4, IPv6 (unicast & multicast), MAC addresses, ports, VLAN IDs, UUIDs, CIDR blocks, and EUI-64 identifiers
-- **Configurable providers** — use the default generator, `math/rand`, `crypto/rand`, or a custom `Provider`
-- **Lock-free** — the primary PRNG uses an atomic counter; no mutexes on the hot path
-- **Pool-backed hashing** — `maphash.Hash` objects are recycled via `sync.Pool` for callers that need them
-
----
+- **Numbers**: signed and unsigned integers, bounded intervals, and floats in `[0, 1)`
+- **Byte fill**: `Read(p []byte)` fills caller-owned buffers with zero allocations
+- **Strings and bytes**: built-in alphabets, custom dictionaries, append APIs, and no adjacent duplicate bytes
+- **Network**: compact enum-based API for IPv4, IPv6, MAC, EUI-64, ports, VLAN IDs, ASNs, VNI, flow labels, MPLS labels, CIDRs, and UUIDs
+- **Providers**: default lock-free provider, `math/rand`, `math/rand/v2`, `crypto/rand`, `math/rand/v2.ChaCha8`, or custom providers
+- **Hash pool**: optional `maphash.Hash` reuse through `NewHashPool`
 
 ## Requirements
 
 - Go **1.26** or later
-
----
 
 ## Installation
 
@@ -51,504 +25,294 @@ It covers numbers, formatted strings, and network addresses with a lock-free def
 go get github.com/colduction/randomizer-go@latest
 ```
 
----
-
 ## Quick Start
 
 ```go
 package main
 
 import (
-    "fmt"
-    "github.com/colduction/randomizer-go"
+	"fmt"
+	"net"
+
+	"github.com/colduction/randomizer-go"
 )
 
 func main() {
-    // Random signed integer
-    fmt.Println(randomizer.Int[int64]())
+	fmt.Println(randomizer.Int[int64]())
+	fmt.Println(randomizer.IntInterval(int64(1), int64(100)))
+	fmt.Println(randomizer.Float64())
 
-    // Random integer in [1, 100)
-    fmt.Println(randomizer.IntInterval(int64(1), int64(100)))
+	fmt.Println(randomizer.Word.String(randomizer.HexLowerAlphabet, 16))
+	fmt.Println(randomizer.Word.String(randomizer.AlphaNumericAlphabet, 24))
+	fmt.Println(randomizer.Word.Custom("ABCDEFGH", 12))
 
-    // Random float in [0, 1)
-    fmt.Println(randomizer.Float64())
+	ip := randomizer.Network.IP(nil, randomizer.IPv4Public)
+	fmt.Println(ip)
 
-    // Random 16-character hex string (lowercase)
-    fmt.Println(randomizer.Word.Hex(16, false))
+	var macBuf [8]byte
+	mac := randomizer.Network.Hardware(macBuf[:0], randomizer.HardwareMAC, randomizer.HardwareOptions{
+		Local: true,
+	})
+	fmt.Println(net.HardwareAddr(mac))
 
-    // Random decimal string of length 12
-    fmt.Println(randomizer.Word.Decimal(12))
-
-    // Random custom string of length 12
-    fmt.Println(randomizer.Word.Custom("ABCDEFGH", 12))
-
-    // Random IPv4 address
-    fmt.Println(randomizer.Network.IPv4Addr())
-
-    // Random MAC address (locally administered, unicast)
-    fmt.Println(randomizer.Network.MACAddr(true, false))
+	var raw [32]byte
+	_, _ = randomizer.Read(raw[:])
 }
 ```
 
----
+## Numbers
 
-## API Reference
-
-### Numbers
-
-With `DefaultProvider`, number functions are **zero-allocation** and safe to call from multiple goroutines simultaneously. A custom provider may introduce its own allocations.
-
-#### `Int[T SignedIntegers]() T`
-
-Returns a random signed integer of the requested type (`int8`, `int16`, `int`, `int32`, `int64`).
+With `DefaultProvider`, number functions are zero-allocation and safe for concurrent use.
 
 ```go
-n8  := randomizer.Int[int8]()
-n32 := randomizer.Int[int32]()
-n64 := randomizer.Int[int64]()
-```
-
-#### `Uint[T UnsignedIntegers]() T`
-
-Returns a random unsigned integer (`uint8`, `uint16`, `uint`, `uint32`, `uint64`, `uintptr`).
-
-```go
+n := randomizer.Int[int64]()
 u := randomizer.Uint[uint64]()
+bounded := randomizer.IntInterval(int64(-50), int64(50))
+ubounded := randomizer.UintInterval(uint64(1), uint64(1000))
+f32 := randomizer.Float32()
+f64 := randomizer.Float64()
 ```
 
-#### `IntInterval[T SignedIntegers](min, max T) T`
+`IntInterval` and `UintInterval` return values in `[min, max)`. Equal bounds return the bound. Swapped bounds are corrected.
 
-Returns a uniformly distributed signed integer in `[min, max)`.  
-If `min == max` the value is returned immediately. Swapped bounds are corrected automatically.
+## Words
+
+`Word.String` and `Word.Bytes` allocate the returned output. `Word.Append` writes into caller-owned capacity and can be zero-allocation. All word generators avoid adjacent duplicate bytes.
 
 ```go
-// Random number from -50 to 49 (inclusive lower, exclusive upper)
-v := randomizer.IntInterval(int64(-50), int64(50))
+s := randomizer.Word.String(randomizer.DecimalAlphabet, 12)
+b := randomizer.Word.Bytes(randomizer.Base64URLAlphabet, 32)
+
+buf := make([]byte, 0, 32)
+buf = randomizer.Word.Append(buf, randomizer.AlphaNumericAlphabet, 32)
 ```
 
-#### `UintInterval[T UnsignedIntegers](min, max T) T`
+Built-in alphabets:
 
-Same as `IntInterval` but for unsigned types.
+| Constant               | Bytes                                    |
+| ---------------------- | ---------------------------------------- |
+| `DecimalAlphabet`      | `0-9`                                    |
+| `HexLowerAlphabet`     | `0-9a-f`                                 |
+| `HexUpperAlphabet`     | `0-9A-F`                                 |
+| `OctalAlphabet`        | `0-7`                                    |
+| `LowerAlphabet`        | `a-z`                                    |
+| `UpperAlphabet`        | `A-Z`                                    |
+| `AlphaAlphabet`        | `a-zA-Z`                                 |
+| `AlphaNumericAlphabet` | `0-9a-zA-Z`                              |
+| `Base32Alphabet`       | RFC 4648 base32 without padding          |
+| `Base64URLAlphabet`    | RFC 4648 URL-safe base64 without padding |
+
+Custom dictionaries sample bytes directly. Repeated dictionary bytes increase weight.
 
 ```go
-// Random number from 1 to 999
-v := randomizer.UintInterval(uint64(1), uint64(1000))
+s := randomizer.Word.Custom("AABCXYZ9", 16)
+s2 := randomizer.Word.CustomFromBytes([]byte("AABCXYZ9"), 16)
+b := randomizer.Word.CustomBytes([]byte("AABCXYZ9"), 16)
+b2 := randomizer.Word.CustomBytesFromString("AABCXYZ9", 16)
+
+dst := []byte("id:")
+dst = randomizer.Word.AppendCustom(dst, "AABCXYZ9", 16)
+dst = randomizer.Word.AppendCustomFromBytes(dst[:3], []byte("AABCXYZ9"), 16)
 ```
 
-#### `Float32() float32`
+Custom string functions return `""` when `length <= 0`, dictionary is empty, or length is greater than 1 and the dictionary cannot avoid adjacent duplicates. Custom byte functions return `nil` for those invalid cases. Append variants return `dst` unchanged.
 
-Returns a random `float32` in `[0, 1)` with 24 bits of precision.
+## Network
+
+Network APIs use small kind enums instead of many single-purpose methods. Slice results allocate only when `dst` capacity is too small.
+
+### IP
 
 ```go
-f := randomizer.Float32()
+ip4 := randomizer.Network.IP(nil, randomizer.IPv4Any)
+public4 := randomizer.Network.IP(nil, randomizer.IPv4Public)
+
+var ipBuf [16]byte
+ip6 := randomizer.Network.IP(ipBuf[:0], randomizer.IPv6Global)
+mc6 := randomizer.Network.IP(ipBuf[:0], randomizer.IPv6LinkLocalMulticast)
 ```
 
-#### `Float64() float64`
+`IPKind` values:
 
-Returns a random `float64` in `[0, 1)` with 53 bits of precision.
+| Family         | Constants                                                                                                                                                    |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| IPv4           | `IPv4Any`, `IPv4Private`, `IPv4LinkLocal`, `IPv4Multicast`, `IPv4Public`                                                                                     |
+| IPv6 unicast   | `IPv6Any`, `IPv6Global`, `IPv6LinkLocal`, `IPv6SiteLocal`, `IPv6UniqueLocal`, `IPv6Private`                                                                  |
+| IPv6 multicast | `IPv6InterfaceLocalMulticast`, `IPv6LinkLocalMulticast`, `IPv6AdminLocalMulticast`, `IPv6SiteLocalMulticast`, `IPv6OrgLocalMulticast`, `IPv6GlobalMulticast` |
+
+### Hardware
 
 ```go
-f := randomizer.Float64()
+mac := randomizer.Network.Hardware(nil, randomizer.HardwareMAC, randomizer.HardwareOptions{
+	Local:     true,
+	Multicast: false,
+})
+
+ouiMAC := randomizer.Network.Hardware(nil, randomizer.HardwareMACOUI, randomizer.HardwareOptions{
+	OUI: [3]byte{0x3c, 0x22, 0xfb},
+})
+
+realOUI := randomizer.Network.Hardware(nil, randomizer.HardwareMACRealOUI, randomizer.HardwareOptions{})
+eui64 := randomizer.Network.Hardware(nil, randomizer.HardwareEUI64, randomizer.HardwareOptions{})
+fromMAC := randomizer.Network.Hardware(nil, randomizer.HardwareEUI64FromMAC, randomizer.HardwareOptions{MAC: mac})
 ```
 
----
+`HardwareKind` values: `HardwareMAC`, `HardwareMACOUI`, `HardwareMACRealOUI`, `HardwareEUI64`, `HardwareEUI64FromMAC`.
 
-### Strings
-
-With `DefaultProvider`, string functions allocate exactly **one** buffer (the output itself). The `String`-returning variants avoid a second allocation by aliasing the buffer directly. A custom provider may introduce its own allocations.
-All generated strings are guaranteed to have **no two adjacent identical characters**.
-
-#### `Word.Decimal(length int) string`
-
-Generates a random decimal string (`0–9`) of the given length.
+### Values
 
 ```go
-s := randomizer.Word.Decimal(12) // e.g. "Morton, 3815"... like "804712639250"
+port := randomizer.Network.Value(randomizer.RegisteredPort)
+vlan := randomizer.Network.Value(randomizer.VLANID)
+asn := randomizer.Network.Value(randomizer.ASN)
+vni := randomizer.Network.Value(randomizer.VNI)
+flow := randomizer.Network.Value(randomizer.FlowLabel)
+mpls := randomizer.Network.Value(randomizer.MPLSLabel)
+iid := randomizer.Network.Value(randomizer.IPv6InterfaceID)
 ```
 
-#### `Word.DecimalBytes(length int) []byte`
+`ValueKind` values:
 
-Same as `Decimal` but returns a `[]byte`, avoiding any string conversion.
+| Constant          | Range                                                   |
+| ----------------- | ------------------------------------------------------- |
+| `AnyPort`         | `[0, 65535]`                                            |
+| `PrivilegedPort`  | `[1, 1023]`                                             |
+| `RegisteredPort`  | `[1024, 49151]`                                         |
+| `EphemeralPort`   | `[49152, 65535]`                                        |
+| `VLANID`          | `[0, 4095]`                                             |
+| `ASN`             | `[0, 4294967295]`                                       |
+| `VNI`             | `[0, 16777215]`                                         |
+| `FlowLabel`       | `[0, 1048575]`                                          |
+| `MPLSLabel`       | `[0, 1048575]`                                          |
+| `IPv6InterfaceID` | 64-bit interface identifier with U/L and I/G bits clear |
+
+### CIDR and Hosts
 
 ```go
-b := randomizer.Word.DecimalBytes(12)
+net4 := randomizer.Network.CIDR(randomizer.IPv4CIDR, 24)
+net6 := randomizer.Network.CIDR(randomizer.IPv6CIDR, 48)
+ula := randomizer.Network.CIDR(randomizer.IPv6ULAPrefix, 0)
+
+host4 := randomizer.Network.IPInCIDR(nil, net4)
+
+var hostBuf [16]byte
+host6 := randomizer.Network.IPInCIDR(hostBuf[:0], net6)
 ```
 
-#### `Word.Hex(length int, uppercase bool) string`
+`CIDR` clamps IPv4 prefix lengths to `[0, 32]` and IPv6 prefix lengths to `[0, 128]`. `IPv6ULAPrefix` always returns a random RFC 4193 `fd00::/8` `/48` prefix.
 
-Generates a random hexadecimal string of the given length.  
-Pass `uppercase: true` to get `A–F`; `false` gives `a–f`.
+### UUID
 
 ```go
-lower := randomizer.Word.Hex(32, false) // e.g. "3a9f1b0c..."
-upper := randomizer.Word.Hex(32, true)  // e.g. "3A9F1B0C..."
+uuid := randomizer.Network.UUID()
+
+buf := make([]byte, 0, 36)
+buf = randomizer.Network.AppendUUID(buf)
 ```
 
-#### `Word.HexBytes(length int, uppercase bool) []byte`
+`UUID` returns a `[16]byte` RFC 4122 version-4 UUID. `AppendUUID` appends lowercase standard text form and can be zero-allocation with enough capacity.
 
-Same as `Hex` but returns `[]byte`.
+## Providers
 
-```go
-b := randomizer.Word.HexBytes(32, false)
-```
-
-#### `Word.Octal(length int) string`
-
-Generates a random octal string (`0–7`) of the given length.
-
-```go
-s := randomizer.Word.Octal(8) // e.g. "53107624"
-```
-
-#### `Word.OctalBytes(length int) []byte`
-
-Same as `Octal` but returns `[]byte`.
-
-```go
-b := randomizer.Word.OctalBytes(8)
-```
-
-#### `Word.Custom(dictionary string, length int) string`
-
-Generates a random string of the given length from `dictionary`.
-Sampling is byte-oriented; repeated bytes in `dictionary` increase their selection weight.
-
-```go
-s := randomizer.Word.Custom("ABCDEFGH", 12)
-```
-
-Returns `""` for `length <= 0`, when `dictionary` is empty, or when `length > 1` and every byte in `dictionary` is identical.
-
-#### `Word.CustomFromBytes(dictionary []byte, length int) string`
-
-Same as `Custom` but reads the dictionary from a `[]byte`.
-
-```go
-s := randomizer.Word.CustomFromBytes([]byte("ABCDEFGH"), 12)
-```
-
-#### `Word.CustomBytes(dictionary []byte, length int) []byte`
-
-Same as `CustomFromBytes` but returns `[]byte`.
-
-```go
-b := randomizer.Word.CustomBytes([]byte("ABCDEFGH"), 12)
-```
-
-Returns `nil` for `length <= 0`, when `dictionary` is empty, or when `length > 1` and every byte in `dictionary` is identical.
-
-#### `Word.CustomBytesFromString(dictionary string, length int) []byte`
-
-Same as `Custom` but returns `[]byte`.
-
-```go
-b := randomizer.Word.CustomBytesFromString("ABCDEFGH", 12)
-```
-
-> Length-based functions return `""` / `nil` for `length <= 0`. Custom-dictionary functions return `""` / `nil` when the dictionary cannot produce output without adjacent duplicates.
-
----
-
-### Network
-
-Network functions return Go standard-library types such as `net.IP`, `net.HardwareAddr`, and `net.IPNet`. Fixed-size value results such as `UUIDv4` are zero-allocation with `DefaultProvider`; slice results allocate their returned storage, and CIDR helpers also allocate masks and `net.IPNet` values.
-
-#### `Network.IPv4Addr() net.IP`
-
-Generates a fully random 4-byte IPv4 address.
-
-```go
-ip := randomizer.Network.IPv4Addr()
-fmt.Println(ip) // e.g. 192.0.2.57
-```
-
-#### `Network.IPv6Addr() net.IP`
-
-Generates a fully random 16-byte IPv6 address.
-
-```go
-ip := randomizer.Network.IPv6Addr()
-fmt.Println(ip) // e.g. 2001:db8::1
-```
-
-#### `Network.MACAddr(local, multicast bool) net.HardwareAddr`
-
-Generates a random 6-byte MAC address.
-
-| Parameter           | Effect                                              |
-| ------------------- | --------------------------------------------------- |
-| `local = true`      | Sets the U/L bit (locally administered)             |
-| `local = false`     | Clears the U/L bit (globally unique / OUI enforced) |
-| `multicast = true`  | Sets the I/G bit (multicast/broadcast)              |
-| `multicast = false` | Clears the I/G bit (unicast)                        |
-
-```go
-// Locally administered unicast (common for virtual/container interfaces)
-mac := randomizer.Network.MACAddr(true, false)
-fmt.Println(mac) // e.g. 02:1a:3f:7c:d2:88
-```
-
-#### `Network.IPv6UnicastAddr(unicastType UnicastType) net.IP`
-
-Generates a random IPv6 unicast address with the correct prefix for the requested type.
-
-| Constant                          | Prefix      | Use case                              |
-| --------------------------------- | ----------- | ------------------------------------- |
-| `GlobalType`                      | `2000::/3`  | Public internet addresses             |
-| `LinkLocalType`                   | `fe80::/10` | On-link communication only            |
-| `SiteLocalType`                   | `fec0::/10` | Deprecated, site-scoped               |
-| `UniqueLocalType` / `PrivateType` | `fd00::/8`  | Private networks (like IPv4 RFC 1918) |
-
-```go
-global    := randomizer.Network.IPv6UnicastAddr(randomizer.GlobalType)
-linkLocal := randomizer.Network.IPv6UnicastAddr(randomizer.LinkLocalType)
-private   := randomizer.Network.IPv6UnicastAddr(randomizer.PrivateType)
-```
-
-#### `Network.IPv6MulticastAddr(scope MulticastScope) net.IP`
-
-Generates a random IPv6 multicast address (`ff00::/8`) with the given scope nibble.
-
-| Constant              | Scope value | Reach                    |
-| --------------------- | ----------- | ------------------------ |
-| `InterfaceLocalScope` | `0x1`       | Same interface only      |
-| `LinkLocalScope`      | `0x2`       | Same link/subnet         |
-| `AdminLocalScope`     | `0x4`       | Administratively defined |
-| `SiteLocalScope`      | `0x5`       | Within a site            |
-| `OrgLocalScope`       | `0x8`       | Within an organisation   |
-| `GlobalScope`         | `0xE`       | Internet-wide            |
-
-```go
-mc := randomizer.Network.IPv6MulticastAddr(randomizer.LinkLocalScope)
-fmt.Println(mc) // e.g. ff02::...
-```
-
-#### `Network.Port(portRange PortRange) uint16`
-
-Returns a random port number within the given range.
-
-| Constant         | Range            | Description                       |
-| ---------------- | ---------------- | --------------------------------- |
-| `AnyPort`        | `[0, 65535]`     | Any valid port                    |
-| `PrivilegedPort` | `[1, 1023]`      | IANA well-known ports             |
-| `RegisteredPort` | `[1024, 49151]`  | IANA registered ports             |
-| `EphemeralPort`  | `[49152, 65535]` | Dynamic/private (ephemeral) ports |
-
-```go
-port := randomizer.Network.Port(randomizer.RegisteredPort)
-fmt.Println(port) // e.g. 8080
-```
-
-#### `Network.VLANID() uint16`
-
-Returns a random 12-bit IEEE 802.1Q VLAN ID in `[0, 4095]`.
-
-```go
-vlan := randomizer.Network.VLANID()
-fmt.Println(vlan) // e.g. 2047
-```
-
-#### `Network.UUIDv4() [16]byte`
-
-Returns a random RFC 4122 version-4 UUID as a `[16]byte` array.
-
-```go
-uuid := randomizer.Network.UUIDv4()
-fmt.Printf("%x\n", uuid[:])
-```
-
-#### `Network.UUIDv4String() string`
-
-Returns a random RFC 4122 version-4 UUID as a 36-character lowercase hex string in the standard `8-4-4-4-12` form. Allocates exactly one buffer.
-
-```go
-s := randomizer.Network.UUIDv4String()
-fmt.Println(s) // e.g. 550e8400-e29b-41d4-a716-446655440000
-```
-
-#### `Network.IPv4CIDR(prefixLen uint8) *net.IPNet`
-
-Returns a random IPv4 network with the given prefix length (clamped to `[0, 32]`).
-
-```go
-net4 := randomizer.Network.IPv4CIDR(24)
-fmt.Println(net4) // e.g. 192.168.5.0/24
-```
-
-#### `Network.IPv6CIDR(prefixLen uint8) *net.IPNet`
-
-Returns a random IPv6 network with the given prefix length (clamped to `[0, 128]`).
-
-```go
-net6 := randomizer.Network.IPv6CIDR(48)
-fmt.Println(net6)
-```
-
-#### `Network.IPv4AddrInCIDR(ipNet *net.IPNet) net.IP`
-
-Returns a random host address within the given IPv4 network. Returns `nil` if `ipNet` is not a valid IPv4 network.
-
-```go
-_, block, _ := net.ParseCIDR("10.0.0.0/8")
-ip := randomizer.Network.IPv4AddrInCIDR(block)
-fmt.Println(ip) // e.g. 10.42.7.93
-```
-
-#### `Network.IPv6AddrInCIDR(ipNet *net.IPNet) net.IP`
-
-Returns a random host address within the given IPv6 network. Returns `nil` if `ipNet` is not a valid IPv6 network.
-
-```go
-_, block, _ := net.ParseCIDR("fd00::/8")
-ip := randomizer.Network.IPv6AddrInCIDR(block)
-fmt.Println(ip)
-```
-
-#### `Network.EUI64() net.HardwareAddr`
-
-Returns a random 8-byte locally-administered unicast EUI-64 identifier.
-
-```go
-eui := randomizer.Network.EUI64()
-fmt.Println(eui) // e.g. 02:1a:3f:7c:d2:88:ab:cd
-```
-
-#### `Network.EUI64FromMAC(mac net.HardwareAddr) net.HardwareAddr`
-
-Derives an EUI-64 identifier from a 6-byte MAC address by inserting `0xFF 0xFE` and flipping the U/L bit (RFC 4291 appendix A). Returns `nil` if `mac` is not exactly 6 bytes.
-
-```go
-mac, _ := net.ParseMAC("02:1a:3f:7c:d2:88")
-eui := randomizer.Network.EUI64FromMAC(mac)
-fmt.Println(eui) // e.g. 00:1a:3f:ff:fe:7c:d2:88
-```
-
----
-
-### Providers
-
-All package generators read from the active `Provider`. The default is `DefaultProvider`; `SetProvider` atomically replaces it and returns the prior provider for restoration.
-
-#### `Provider`
-
-A custom provider implements `Sum`, `Sum32`, and `Sum64`. Implementations passed directly to `SetProvider` must be safe for concurrent use.
+All package generators read from the active `Provider`. `SetProvider` atomically swaps it and returns the prior provider. Passing `nil` restores `DefaultProvider`.
 
 ```go
 type Provider interface {
-    Sum([]byte) []byte
-    Sum32() uint32
-    Sum64() uint64
+	Read([]byte) (int, error)
+	Sum([]byte) []byte
+	Sum32() uint32
+	Sum64() uint64
 }
 ```
 
-#### `NewUint64Provider(source interface{ Uint64() uint64 }) Provider`
+### DefaultProvider
 
-Creates a lock-free provider from sources such as `*math/rand.Rand` or `math/rand/v2.Source`. The source is read once for seeding; concurrent generation uses an atomic SplitMix64 stream.
+`DefaultProvider` is lock-free for number and byte generation. It also supports `io.Reader` style byte fill:
 
 ```go
-import "math/rand"
+var buf [256]byte
+_, _ = randomizer.Read(buf[:])
 
-provider := randomizer.NewUint64Provider(rand.New(rand.NewSource(42)))
-previous := randomizer.SetProvider(provider)
-defer randomizer.SetProvider(previous)
+n64 := randomizer.DefaultProvider.Sum64()
+n32 := randomizer.DefaultProvider.Sum32()
+dst := randomizer.DefaultProvider.Sum(existing)
 ```
 
-#### `NewReaderProvider(reader io.Reader) Provider`
+### NewUint64Provider
 
-Creates a provider that reads every value directly from a concurrency-safe reader. Use `crypto/rand.Reader` for cryptographically secure output.
+`NewUint64Provider(source interface{ Uint64() uint64 }) Provider` seeds a lock-free provider by calling `source.Uint64()` once.
+
+```go
+import (
+	mrand "math/rand"
+	randv2 "math/rand/v2"
+)
+
+p1 := randomizer.NewUint64Provider(mrand.New(mrand.NewSource(42)))
+p2 := randomizer.NewUint64Provider(randv2.New(randv2.NewPCG(1, 2)))
+
+chacha := randv2.NewChaCha8([32]byte{})
+p3 := randomizer.NewUint64Provider(chacha)
+```
+
+Use this constructor when high concurrent access matters.
+
+### NewReaderProvider
+
+`NewReaderProvider(reader io.Reader) Provider` reads every value from the supplied reader.
 
 ```go
 import cryptorand "crypto/rand"
 
-provider := randomizer.NewReaderProvider(cryptorand.Reader)
-previous := randomizer.SetProvider(provider)
+p := randomizer.NewReaderProvider(cryptorand.Reader)
+previous := randomizer.SetProvider(p)
 defer randomizer.SetProvider(previous)
 ```
 
-Reader failures panic because the `Provider` interface does not return errors.
+This works with `crypto/rand.Reader` and readers such as `math/rand/v2.ChaCha8`. The reader must be safe for concurrent use when installed as the package provider. `crypto/rand.Reader` is safe. A shared `ChaCha8` value should be protected or used through `NewUint64Provider`.
 
-#### `SetProvider(provider Provider) Provider`
+`Read` returns errors. `Sum`, `Sum32`, and `Sum64` panic on reader errors because their signatures cannot return errors.
 
-Atomically sets the provider used by `Int`, `Float64`, `Word.*`, `Network.*`, and the other package generators. Passing `nil` restores `DefaultProvider`.
+## HashPool
 
----
-
-### HashPool (advanced)
-
-The private `hashPool` type implements `Provider`. `DefaultProvider` exposes its random-value methods through the `Provider` interface, while `NewHashPool` returns a pool value whose exported methods can also borrow and reuse `maphash.Hash` objects.
-
-#### `DefaultProvider`
-
-A package-level default provider. Package generators use it unless `SetProvider` installs another provider.
-
-```go
-// Raw 64-bit random number
-n := randomizer.DefaultProvider.Sum64()
-
-// Raw 32-bit random number
-n32 := randomizer.DefaultProvider.Sum32()
-
-// Append 8 random bytes to an existing slice
-buf := randomizer.DefaultProvider.Sum(existingSlice)
-```
-
-#### `NewHashPool(size int) *hashPool`
-
-Creates a new independent provider and hash pool. Its private concrete return type can still be used through the returned value's exported methods. Pass any positive `size`; `sync.Pool` manages actual capacity. The function returns `nil` for `size <= 0`, and its methods are safe on a nil receiver.
+`NewHashPool(size int) *hashPool` creates an independent provider and a `sync.Pool` of `maphash.Hash` values. It returns `nil` for `size <= 0`; nil receiver methods are safe.
 
 ```go
 pool := randomizer.NewHashPool(16)
 
-// Borrow a maphash.Hash from the pool
 h := pool.Get()
-h.WriteString("hello")
-fmt.Println(h.Sum64())
-pool.Put(h) // always return it when done
-```
-
-#### `Get() *maphash.Hash` / `Put(h *maphash.Hash)`
-
-Borrow and return a `maphash.Hash` from the pool. The hash is automatically reset on `Put`. Always pair every `Get` with a `Put` to avoid leaking objects.
-
-```go
-pool := randomizer.NewHashPool(16)
-h := pool.Get()
-defer pool.Put(h)
-
 h.WriteString("seed-data")
 fmt.Printf("%016x\n", h.Sum64())
+pool.Put(h)
 ```
-
----
 
 ## Performance
 
-Benchmarks use `DefaultProvider` on an AMD Ryzen 9 7950X, Go 1.26, `GOMAXPROCS=32`:
+Representative benchmarks on AMD Ryzen 9 7950X, Go 1.26, `GOMAXPROCS=32`:
 
-| Benchmark                 | Time/op | Allocs/op |
-| ------------------------- | ------- | --------- |
-| `Int[int64]`              | ~4.9 ns | 0         |
-| `IntInterval` (signed)    | ~7.8 ns | 0         |
-| `Uint[uint64]`            | ~4.9 ns | 0         |
-| `UintInterval` (unsigned) | ~7.6 ns | 0         |
-| `Float32`                 | ~6.5 ns | 0         |
-| `Float64`                 | ~6.3 ns | 0         |
-| `Word.Decimal(256)`       | ~800 ns | 1         |
-| `Word.Hex(256)`           | ~470 ns | 1         |
-| `Word.Octal(256)`         | ~590 ns | 1         |
-| `Network.IPv4Addr`        | ~11 ns  | 1         |
-| `Network.IPv6Addr`        | ~18 ns  | 1         |
-| `Network.MACAddr`         | ~14 ns  | 1         |
+| Benchmark                                | Time/op  | Allocs/op |
+| ---------------------------------------- | -------- | --------- |
+| `Int[int64]`                             | ~4.9 ns  | 0         |
+| `IntInterval`                            | ~7.8 ns  | 0         |
+| `Float64`                                | ~6.3 ns  | 0         |
+| `Read(256 bytes)`                        | ~60 ns   | 0         |
+| `Word.String(DecimalAlphabet, 256)`      | ~800 ns  | 1         |
+| `Word.String(Base64URLAlphabet, 256)`    | ~380 ns  | 1         |
+| `Word.Append(AlphaNumericAlphabet, 256)` | ~490 ns  | 0         |
+| `Network.IP(nil, IPv4Any)`               | ~10 ns   | 1         |
+| `Network.IP(buf, IPv4Any)`               | ~6.5 ns  | 0         |
+| `Network.Hardware(nil, HardwareMAC)`     | ~14.5 ns | 1         |
+| `Network.Hardware(buf, HardwareMAC)`     | ~7.2 ns  | 0         |
+| `Network.Value(AnyPort)`                 | ~6.1 ns  | 0         |
+| `Network.UUID()`                         | ~9.3 ns  | 0         |
+| `Network.AppendUUID(buf)`                | ~24 ns   | 0         |
+| `Network.CIDR(IPv6CIDR, 48)`             | ~33 ns   | 1         |
 
-Number functions and fixed-size value generators such as `Network.UUIDv4` remain zero-allocation. String functions allocate their returned buffer. Slice- and pointer-returning network functions allocate according to the returned standard-library value; CIDR helpers may require additional allocations for masks and `net.IPNet`.
-
----
+Slice-returning functions allocate when they create returned storage. Append and buffer-taking APIs can be zero-allocation when caller capacity is enough.
 
 ## Thread Safety
 
-Package generators and provider replacement are safe for concurrent use. `DefaultProvider` and providers returned by `NewUint64Provider` use atomic state without a mutex. Readers passed to `NewReaderProvider` and custom implementations passed to `SetProvider` must be safe for concurrent use; `crypto/rand.Reader` satisfies this requirement.
-
----
+Package generators and provider replacement are safe for concurrent use. `DefaultProvider` and providers from `NewUint64Provider` use atomic state. Providers installed with `NewReaderProvider` are only as concurrent-safe as their wrapped reader.
 
 ## License
 

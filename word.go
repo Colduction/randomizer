@@ -1,94 +1,119 @@
 package randomizer
 
-import "unsafe"
+import (
+	"slices"
+	"unsafe"
+)
 
 const (
 	deci     string = "0123456789"
 	octi     string = "01234567"
 	lhexdict string = "0123456789abcdef"
 	uhexdict string = "0123456789ABCDEF"
+	lower    string = "abcdefghijklmnopqrstuvwxyz"
+	upper    string = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+	alpha    string = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+	alnum    string = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+	base32   string = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+	base64u  string = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 )
 
 type word struct{}
 
-// Word provides random decimal, hexadecimal, octal, and custom strings using the
-// active [Provider] selected by [SetProvider].
+// Word provides random strings and byte sequences using the active [Provider]
+// selected by [SetProvider].
 var Word word
 
-// Decimal returns a random decimal string of the given length.
-func (word) Decimal(length int) string {
-	if length <= 0 {
+// Alphabet identifies a built-in byte alphabet used by [Word].
+type Alphabet uint8
+
+const (
+	// DecimalAlphabet selects decimal digits 0-9.
+	DecimalAlphabet Alphabet = iota
+	// HexLowerAlphabet selects lowercase hexadecimal digits 0-9 and a-f.
+	HexLowerAlphabet
+	// HexUpperAlphabet selects uppercase hexadecimal digits 0-9 and A-F.
+	HexUpperAlphabet
+	// OctalAlphabet selects octal digits 0-7.
+	OctalAlphabet
+	// LowerAlphabet selects lowercase ASCII letters a-z.
+	LowerAlphabet
+	// UpperAlphabet selects uppercase ASCII letters A-Z.
+	UpperAlphabet
+	// AlphaAlphabet selects ASCII letters a-z and A-Z.
+	AlphaAlphabet
+	// AlphaNumericAlphabet selects ASCII digits and letters.
+	AlphaNumericAlphabet
+	// Base32Alphabet selects RFC 4648 base32 bytes without padding.
+	Base32Alphabet
+	// Base64URLAlphabet selects RFC 4648 URL-safe base64 bytes without padding.
+	Base64URLAlphabet
+)
+
+func alphabetData(alphabet Alphabet) (string, uint8) {
+	switch alphabet {
+	case HexLowerAlphabet:
+		return lhexdict, 4
+	case HexUpperAlphabet:
+		return uhexdict, 4
+	case OctalAlphabet:
+		return octi, 3
+	case LowerAlphabet:
+		return lower, 0
+	case UpperAlphabet:
+		return upper, 0
+	case AlphaAlphabet:
+		return alpha, 0
+	case AlphaNumericAlphabet:
+		return alnum, 0
+	case Base32Alphabet:
+		return base32, 5
+	case Base64URLAlphabet:
+		return base64u, 6
+	default:
+		return deci, 0
+	}
+}
+
+// String returns a random string of the given length from alphabet.
+// Unknown alphabet values use [DecimalAlphabet].
+func (w word) String(alphabet Alphabet, length int) string {
+	out := w.Bytes(alphabet, length)
+	if len(out) == 0 {
 		return ""
 	}
-	out := make([]byte, length)
-	fillAlphabetNoRepeat(out, deci, 0, currentProvider())
 	return unsafe.String(unsafe.SliceData(out), len(out))
 }
 
-// DecimalBytes returns a random decimal byte slice of the given length.
-func (word) DecimalBytes(length int) []byte {
+// Bytes returns a random byte slice of the given length from alphabet.
+// Unknown alphabet values use [DecimalAlphabet].
+func (word) Bytes(alphabet Alphabet, length int) []byte {
 	if length <= 0 {
 		return nil
 	}
 	out := make([]byte, length)
-	fillAlphabetNoRepeat(out, deci, 0, currentProvider())
+	dict, bits := alphabetData(alphabet)
+	fillAlphabetNoRepeat(out, dict, bits, currentProvider())
 	return out
 }
 
-// Hex returns a random hexadecimal string of the given length.
-// If uppercase is true, A-F are used; otherwise a-f.
-func (word) Hex(length int, uppercase bool) string {
+// Append appends a random byte sequence of the given length from alphabet to dst.
+// It allocates only when dst lacks capacity. Unknown alphabet values use [DecimalAlphabet].
+func (word) Append(dst []byte, alphabet Alphabet, length int) []byte {
 	if length <= 0 {
-		return ""
+		return dst
 	}
-	dict := lhexdict
-	if uppercase {
-		dict = uhexdict
-	}
-	out := make([]byte, length)
-	fillAlphabetNoRepeat(out, dict, 4, currentProvider())
-	return unsafe.String(unsafe.SliceData(out), len(out))
-}
-
-// HexBytes returns a random hexadecimal byte slice of the given length.
-// If uppercase is true, A-F are used; otherwise a-f.
-func (word) HexBytes(length int, uppercase bool) []byte {
-	if length <= 0 {
-		return nil
-	}
-	dict := lhexdict
-	if uppercase {
-		dict = uhexdict
-	}
-	out := make([]byte, length)
-	fillAlphabetNoRepeat(out, dict, 4, currentProvider())
-	return out
-}
-
-// Octal returns a random octal string of the given length.
-func (word) Octal(length int) string {
-	if length <= 0 {
-		return ""
-	}
-	out := make([]byte, length)
-	fillAlphabetNoRepeat(out, octi, 3, currentProvider())
-	return unsafe.String(unsafe.SliceData(out), len(out))
-}
-
-// OctalBytes returns a random octal byte slice of the given length.
-func (word) OctalBytes(length int) []byte {
-	if length <= 0 {
-		return nil
-	}
-	out := make([]byte, length)
-	fillAlphabetNoRepeat(out, octi, 3, currentProvider())
-	return out
+	offset := len(dst)
+	dst = slices.Grow(dst, length)[:offset+length]
+	dict, bits := alphabetData(alphabet)
+	fillAlphabetNoRepeat(dst[offset:], dict, bits, currentProvider())
+	return dst
 }
 
 // Custom returns a random string of the given length, or an empty string when
 // dictionary cannot avoid adjacent duplicates.
 func (word) Custom(dictionary string, length int) string {
-	out := customBytes(dictionary, length)
+	out := appendCustom(nil, dictionary, length)
 	if len(out) == 0 {
 		return ""
 	}
@@ -98,7 +123,7 @@ func (word) Custom(dictionary string, length int) string {
 // CustomFromBytes returns a random string of the given length, or
 // an empty string when dictionary cannot avoid adjacent duplicates.
 func (word) CustomFromBytes(dictionary []byte, length int) string {
-	out := customBytes(dictionary, length)
+	out := appendCustom(nil, dictionary, length)
 	if len(out) == 0 {
 		return ""
 	}
@@ -108,33 +133,46 @@ func (word) CustomFromBytes(dictionary []byte, length int) string {
 // CustomBytes returns a random byte slice of the given length, or
 // nil when dictionary cannot avoid adjacent duplicates.
 func (word) CustomBytes(dictionary []byte, length int) []byte {
-	return customBytes(dictionary, length)
+	return appendCustom(nil, dictionary, length)
 }
 
 // CustomBytesFromString returns a random byte slice of the given length, or nil
 // when dictionary cannot avoid adjacent duplicates.
 func (word) CustomBytesFromString(dictionary string, length int) []byte {
-	return customBytes(dictionary, length)
+	return appendCustom(nil, dictionary, length)
 }
 
-func customBytes[B ~string | ~[]byte](dictionary B, length int) []byte {
+// AppendCustom appends a random byte sequence from dictionary to dst.
+// It returns dst unchanged when dictionary cannot avoid adjacent duplicates.
+func (word) AppendCustom(dst []byte, dictionary string, length int) []byte {
+	return appendCustom(dst, dictionary, length)
+}
+
+// AppendCustomFromBytes appends a random byte sequence from dictionary to dst.
+// It returns dst unchanged when dictionary cannot avoid adjacent duplicates.
+func (word) AppendCustomFromBytes(dst []byte, dictionary []byte, length int) []byte {
+	return appendCustom(dst, dictionary, length)
+}
+
+func appendCustom[B ~string | ~[]byte](dst []byte, dictionary B, length int) []byte {
 	if length <= 0 || len(dictionary) == 0 {
-		return nil
+		return dst
 	}
 	if length > 1 {
 		first := dictionary[0]
 		for i := 1; ; i++ {
 			if i == len(dictionary) {
-				return nil
+				return dst
 			}
 			if dictionary[i] != first {
 				break
 			}
 		}
 	}
-	out := make([]byte, length)
-	fillAlphabetNoRepeat(out, dictionary, 0, currentProvider())
-	return out
+	offset := len(dst)
+	dst = slices.Grow(dst, length)[:offset+length]
+	fillAlphabetNoRepeat(dst[offset:], dictionary, 0, currentProvider())
+	return dst
 }
 
 // fillAlphabetNoRepeat fills out with characters from dict ensuring no two adjacent characters are identical.

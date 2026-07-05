@@ -14,6 +14,21 @@ import (
 
 type fixedProvider uint64
 
+func (fp fixedProvider) Read(p []byte) (int, error) {
+	var i int
+	for ; i+8 <= len(p); i += 8 {
+		binary.LittleEndian.PutUint64(p[i:i+8], uint64(fp))
+	}
+	if i < len(p) {
+		x := uint64(fp)
+		for j := i; j < len(p); j++ {
+			p[j] = byte(x)
+			x >>= 8
+		}
+	}
+	return len(p), nil
+}
+
 func (fp fixedProvider) Sum(b []byte) []byte {
 	return binary.LittleEndian.AppendUint64(b, uint64(fp))
 }
@@ -46,11 +61,22 @@ func TestProviderSetProviderRoutesGenerators(t *testing.T) {
 	if got := randomizer.Uint[uint64](); got != uint64(value) {
 		t.Fatalf("Uint[uint64]() = 0x%016x, want 0x%016x", got, uint64(value))
 	}
-	if got := randomizer.Word.Hex(16, false); got != "fedcba9876543210" {
+	if got := randomizer.Word.String(randomizer.HexLowerAlphabet, 16); got != "fedcba9876543210" {
 		t.Fatalf("Word.Hex(16, false) = %q, want %q", got, "fedcba9876543210")
 	}
-	if got := randomizer.Network.VLANID(); got != 0x12 {
-		t.Fatalf("Network.VLANID() = 0x%x, want 0x12", got)
+	if got := randomizer.Network.Value(randomizer.VLANID); got != 0x12 {
+		t.Fatalf("Network.Value(VLANID) = 0x%x, want 0x12", got)
+	}
+	var buf [12]byte
+	if n, err := randomizer.Read(buf[:]); n != len(buf) || err != nil {
+		t.Fatalf("Read length/error = %d/%v, want %d/nil", n, err, len(buf))
+	}
+	want := []byte{
+		0xef, 0xcd, 0xab, 0x89, 0x67, 0x45, 0x23, 0x01,
+		0xef, 0xcd, 0xab, 0x89,
+	}
+	if !bytes.Equal(buf[:], want) {
+		t.Fatalf("Read bytes = %x, want %x", buf, want)
 	}
 }
 
@@ -165,6 +191,28 @@ func TestReaderProviderValues(t *testing.T) {
 	}
 }
 
+func TestReaderProviderRead(t *testing.T) {
+	data := []byte{0x01, 0x02, 0x03, 0x04, 0x05}
+	provider := randomizer.NewReaderProvider(bytes.NewReader(data))
+	if provider == nil {
+		t.Fatal("NewReaderProvider returned nil")
+	}
+
+	buf := make([]byte, len(data))
+	n, err := provider.Read(buf)
+	if n != len(data) || err != nil {
+		t.Fatalf("Read length/error = %d/%v, want %d/nil", n, err, len(data))
+	}
+	if !bytes.Equal(buf, data) {
+		t.Fatalf("Read bytes = %x, want %x", buf, data)
+	}
+
+	n, err = provider.Read(buf[:1])
+	if n != 0 || err == nil {
+		t.Fatalf("Read exhausted length/error = %d/%v, want 0/error", n, err)
+	}
+}
+
 func TestReaderProviderSupportsCryptoRand(t *testing.T) {
 	const goroutines = 32
 
@@ -194,4 +242,14 @@ func TestProviderConstructorsRejectNil(t *testing.T) {
 		t.Fatalf("NewReaderProvider(nil) = %v, want nil", got)
 	}
 
+}
+
+var benchProviderReadBuf [256]byte
+
+func BenchmarkProviderReadDefault(b *testing.B) {
+	buf := benchProviderReadBuf[:]
+	b.ReportAllocs()
+	for b.Loop() {
+		_, _ = randomizer.Read(buf)
+	}
 }

@@ -1,6 +1,7 @@
 package randomizer_test
 
 import (
+	"bytes"
 	"net"
 	"testing"
 
@@ -8,31 +9,100 @@ import (
 )
 
 var (
-	benchIP  net.IP
-	benchMAC net.HardwareAddr
+	benchIP     net.IP
+	benchMAC    net.HardwareAddr
+	benchPort   uint64
+	benchUUID   [16]byte
+	benchUUIDB  []byte
+	benchIPNet  *net.IPNet
+	benchValue  uint64
+	benchBuffer [64]byte
 )
 
-func TestNetworkIPv4Addr(t *testing.T) {
-	ip := randomizer.Network.IPv4Addr()
-	if len(ip) != net.IPv4len {
-		t.Fatalf("IPv4Addr length = %d, want %d", len(ip), net.IPv4len)
+func TestNetworkIP(t *testing.T) {
+	ip4 := randomizer.Network.IP(nil, randomizer.IPv4Any)
+	if len(ip4) != net.IPv4len || ip4.To4() == nil {
+		t.Fatalf("IP(IPv4Any) = %v, want 4-byte IPv4", ip4)
 	}
-	if ip.To4() == nil {
-		t.Fatal("IPv4Addr returned non-IPv4 address")
+
+	ip6 := randomizer.Network.IP(nil, randomizer.IPv6Any)
+	if len(ip6) != net.IPv6len || ip6.To16() == nil {
+		t.Fatalf("IP(IPv6Any) = %v, want 16-byte IPv6", ip6)
+	}
+
+	var buf [16]byte
+	got := randomizer.Network.IP(buf[:0], randomizer.IPv6Any)
+	if len(got) != net.IPv6len || &got[0] != &buf[0] {
+		t.Fatal("IP did not reuse caller buffer")
 	}
 }
 
-func TestNetworkIPv6Addr(t *testing.T) {
-	ip := randomizer.Network.IPv6Addr()
-	if len(ip) != net.IPv6len {
-		t.Fatalf("IPv6Addr length = %d, want %d", len(ip), net.IPv6len)
-	}
-	if ip.To16() == nil {
-		t.Fatal("IPv6Addr returned non-IPv6 address")
+func TestNetworkIPv4Kinds(t *testing.T) {
+	for range 100 {
+		private := randomizer.Network.IP(nil, randomizer.IPv4Private)
+		if private.To4() == nil || !private.IsPrivate() {
+			t.Fatalf("IP(IPv4Private) = %v, want private IPv4", private)
+		}
+
+		linkLocal := randomizer.Network.IP(nil, randomizer.IPv4LinkLocal)
+		if linkLocal.To4() == nil || !linkLocal.IsLinkLocalUnicast() || linkLocal[0] != 169 || linkLocal[1] != 254 {
+			t.Fatalf("IP(IPv4LinkLocal) = %v, want 169.254.0.0/16", linkLocal)
+		}
+
+		multicast := randomizer.Network.IP(nil, randomizer.IPv4Multicast)
+		if multicast.To4() == nil || !multicast.IsMulticast() || multicast[0] < 224 || multicast[0] > 239 {
+			t.Fatalf("IP(IPv4Multicast) = %v, want multicast IPv4", multicast)
+		}
+
+		public := randomizer.Network.IP(nil, randomizer.IPv4Public)
+		if public.To4() == nil || public.IsPrivate() || public.IsLoopback() ||
+			public.IsLinkLocalUnicast() || public.IsMulticast() || public.IsUnspecified() ||
+			public[0] == 0 || public[0] >= 240 {
+			t.Fatalf("IP(IPv4Public) = %v, want public IPv4", public)
+		}
 	}
 }
 
-func TestNetworkMACAddrBits(t *testing.T) {
+func TestNetworkIPv6Kinds(t *testing.T) {
+	cases := []struct {
+		kind randomizer.IPKind
+		fn   func(net.IP) bool
+	}{
+		{randomizer.IPv6Global, func(ip net.IP) bool { return ip[0]&0xe0 == 0x20 }},
+		{randomizer.IPv6LinkLocal, func(ip net.IP) bool { return ip[0] == 0xfe && ip[1]&0xc0 == 0x80 }},
+		{randomizer.IPv6SiteLocal, func(ip net.IP) bool { return ip[0] == 0xfe && ip[1]&0xc0 == 0xc0 }},
+		{randomizer.IPv6UniqueLocal, func(ip net.IP) bool { return ip[0] == 0xfd }},
+		{randomizer.IPv6Private, func(ip net.IP) bool { return ip[0] == 0xfd }},
+	}
+	for _, tc := range cases {
+		ip := randomizer.Network.IP(nil, tc.kind)
+		if len(ip) != net.IPv6len || !tc.fn(ip) {
+			t.Fatalf("IP(%v) = %v, prefix mismatch", tc.kind, ip)
+		}
+	}
+}
+
+func TestNetworkIPv6Multicast(t *testing.T) {
+	cases := []struct {
+		kind  randomizer.IPKind
+		scope byte
+	}{
+		{randomizer.IPv6InterfaceLocalMulticast, 0x1},
+		{randomizer.IPv6LinkLocalMulticast, 0x2},
+		{randomizer.IPv6AdminLocalMulticast, 0x4},
+		{randomizer.IPv6SiteLocalMulticast, 0x5},
+		{randomizer.IPv6OrgLocalMulticast, 0x8},
+		{randomizer.IPv6GlobalMulticast, 0xe},
+	}
+	for _, tc := range cases {
+		ip := randomizer.Network.IP(nil, tc.kind)
+		if len(ip) != net.IPv6len || ip[0] != 0xff || ip[1] != tc.scope {
+			t.Fatalf("IP(%v) = %v, want ff%02x::/16 scope byte", tc.kind, ip, tc.scope)
+		}
+	}
+}
+
+func TestNetworkHardware(t *testing.T) {
 	cases := []struct {
 		local     bool
 		multicast bool
@@ -43,318 +113,328 @@ func TestNetworkMACAddrBits(t *testing.T) {
 		{local: true, multicast: true},
 	}
 	for _, tc := range cases {
-		mac := randomizer.Network.MACAddr(tc.local, tc.multicast)
+		mac := randomizer.Network.Hardware(nil, randomizer.HardwareMAC, randomizer.HardwareOptions{
+			Local:     tc.local,
+			Multicast: tc.multicast,
+		})
 		if len(mac) != 6 {
-			t.Fatalf("MACAddr length = %d, want 6", len(mac))
+			t.Fatalf("Hardware(HardwareMAC) length = %d, want 6", len(mac))
 		}
-		gotLocal := (mac[0] & 0x02) != 0
-		if gotLocal != tc.local {
-			t.Fatalf("MACAddr local bit = %t, want %t (mac=%v)", gotLocal, tc.local, mac)
+		if got := mac[0]&0x02 != 0; got != tc.local {
+			t.Fatalf("HardwareMAC local bit = %t, want %t", got, tc.local)
 		}
-		gotMulticast := (mac[0] & 0x01) != 0
-		if gotMulticast != tc.multicast {
-			t.Fatalf("MACAddr multicast bit = %t, want %t (mac=%v)", gotMulticast, tc.multicast, mac)
+		if got := mac[0]&0x01 != 0; got != tc.multicast {
+			t.Fatalf("HardwareMAC multicast bit = %t, want %t", got, tc.multicast)
 		}
 	}
-}
 
-func TestNetworkIPv6UnicastPrefixes(t *testing.T) {
-	global := randomizer.Network.IPv6UnicastAddr(randomizer.GlobalType)
-	if len(global) != net.IPv6len {
-		t.Fatalf("Global unicast length = %d, want %d", len(global), net.IPv6len)
-	}
-	if global[0]&0xE0 != 0x20 {
-		t.Fatalf("Global unicast prefix mismatch: first byte=0x%02X", global[0])
-	}
-
-	linkLocal := randomizer.Network.IPv6UnicastAddr(randomizer.LinkLocalType)
-	if linkLocal[0] != 0xFE || (linkLocal[1]&0xC0) != 0x80 {
-		t.Fatalf("Link-local prefix mismatch: first two bytes=0x%02X 0x%02X", linkLocal[0], linkLocal[1])
-	}
-
-	siteLocal := randomizer.Network.IPv6UnicastAddr(randomizer.SiteLocalType)
-	if siteLocal[0] != 0xFE || (siteLocal[1]&0xC0) != 0xC0 {
-		t.Fatalf("Site-local prefix mismatch: first two bytes=0x%02X 0x%02X", siteLocal[0], siteLocal[1])
-	}
-
-	uniqueLocal := randomizer.Network.IPv6UnicastAddr(randomizer.UniqueLocalType)
-	if uniqueLocal[0] != 0xFD {
-		t.Fatalf("Unique-local prefix mismatch: first byte=0x%02X", uniqueLocal[0])
-	}
-
-	privateLocal := randomizer.Network.IPv6UnicastAddr(randomizer.PrivateType)
-	if privateLocal[0] != 0xFD {
-		t.Fatalf("PrivateType prefix mismatch: first byte=0x%02X", privateLocal[0])
+	var buf [8]byte
+	got := randomizer.Network.Hardware(buf[:0], randomizer.HardwareEUI64, randomizer.HardwareOptions{})
+	if len(got) != 8 || &got[0] != &buf[0] {
+		t.Fatal("Hardware did not reuse caller buffer")
 	}
 }
 
-func TestNetworkIPv6MulticastScope(t *testing.T) {
-	scopes := []randomizer.MulticastScope{
-		randomizer.InterfaceLocalScope,
-		randomizer.LinkLocalScope,
-		randomizer.AdminLocalScope,
-		randomizer.SiteLocalScope,
-		randomizer.OrgLocalScope,
-		randomizer.GlobalScope,
+func TestNetworkHardwareOUI(t *testing.T) {
+	oui := [3]byte{0x02, 0x1a, 0x3f}
+	mac := randomizer.Network.Hardware(nil, randomizer.HardwareMACOUI, randomizer.HardwareOptions{OUI: oui})
+	if len(mac) != 6 || mac[0] != oui[0] || mac[1] != oui[1] || mac[2] != oui[2] {
+		t.Fatalf("Hardware(HardwareMACOUI) = %x, want prefix %x", mac, oui)
 	}
-	for _, scope := range scopes {
-		ip := randomizer.Network.IPv6MulticastAddr(scope)
-		if len(ip) != net.IPv6len {
-			t.Fatalf("IPv6MulticastAddr length = %d, want %d", len(ip), net.IPv6len)
-		}
-		if ip[0] != 0xFF {
-			t.Fatalf("IPv6MulticastAddr prefix byte = 0x%02X, want 0xFF", ip[0])
-		}
-		if ip[1]&0x0F != uint8(scope) {
-			t.Fatalf("IPv6MulticastAddr scope nibble = 0x%X, want 0x%X", ip[1]&0x0F, uint8(scope))
-		}
-		if ip[1]&0xF0 != 0x00 {
-			t.Fatalf("IPv6MulticastAddr flags nibble = 0x%X, want 0x0", ip[1]>>4)
-		}
+
+	real := randomizer.Network.Hardware(nil, randomizer.HardwareMACRealOUI, randomizer.HardwareOptions{})
+	if len(real) != 6 || real[0]&0x03 != 0 {
+		t.Fatalf("Hardware(HardwareMACRealOUI) = %x, want universal unicast", real)
 	}
 }
 
-func BenchmarkNetworkIPv4Addr(b *testing.B) {
-	b.ReportAllocs()
-	for b.Loop() {
-		benchIP = randomizer.Network.IPv4Addr()
+func TestNetworkHardwareEUI64FromMAC(t *testing.T) {
+	mac := net.HardwareAddr{0x00, 0x1a, 0x2b, 0x3c, 0x4d, 0x5e}
+	eui := randomizer.Network.Hardware(nil, randomizer.HardwareEUI64FromMAC, randomizer.HardwareOptions{MAC: mac})
+	if len(eui) != 8 {
+		t.Fatalf("Hardware(HardwareEUI64FromMAC) length = %d, want 8", len(eui))
+	}
+	if eui[0] != mac[0]^0x02 || eui[1] != mac[1] || eui[2] != mac[2] {
+		t.Fatalf("HardwareEUI64FromMAC OUI mismatch: got %x", eui[:3])
+	}
+	if eui[3] != 0xff || eui[4] != 0xfe || eui[5] != mac[3] || eui[6] != mac[4] || eui[7] != mac[5] {
+		t.Fatalf("HardwareEUI64FromMAC suffix mismatch: got %x", eui[3:])
+	}
+	if got := randomizer.Network.Hardware(nil, randomizer.HardwareEUI64FromMAC, randomizer.HardwareOptions{
+		MAC: net.HardwareAddr{0x00},
+	}); got != nil {
+		t.Fatalf("HardwareEUI64FromMAC invalid MAC = %x, want nil", got)
 	}
 }
 
-func BenchmarkNetworkIPv6Addr(b *testing.B) {
-	b.ReportAllocs()
-	for b.Loop() {
-		benchIP = randomizer.Network.IPv6Addr()
-	}
-}
-
-func BenchmarkNetworkMACAddr(b *testing.B) {
-	b.ReportAllocs()
-	for b.Loop() {
-		benchMAC = randomizer.Network.MACAddr(true, true)
-	}
-}
-
-func BenchmarkNetworkIPv6UnicastAddr(b *testing.B) {
-	b.ReportAllocs()
-	for b.Loop() {
-		benchIP = randomizer.Network.IPv6UnicastAddr(randomizer.GlobalType)
-	}
-}
-
-func BenchmarkNetworkIPv6MulticastAddr(b *testing.B) {
-	b.ReportAllocs()
-	for b.Loop() {
-		benchIP = randomizer.Network.IPv6MulticastAddr(randomizer.GlobalScope)
-	}
-}
-
-func TestNetworkPort(t *testing.T) {
+func TestNetworkValueRanges(t *testing.T) {
 	cases := []struct {
-		portRange randomizer.PortRange
-		min, max  uint16
+		kind     randomizer.ValueKind
+		min, max uint64
 	}{
 		{randomizer.AnyPort, 0, 65535},
 		{randomizer.PrivilegedPort, 1, 1023},
 		{randomizer.RegisteredPort, 1024, 49151},
 		{randomizer.EphemeralPort, 49152, 65535},
+		{randomizer.VLANID, 0, 4095},
+		{randomizer.VNI, 0, 0xffffff},
+		{randomizer.FlowLabel, 0, 0xfffff},
+		{randomizer.MPLSLabel, 0, 0xfffff},
 	}
 	for _, tc := range cases {
 		for range 1000 {
-			p := randomizer.Network.Port(tc.portRange)
-			if p < tc.min || p > tc.max {
-				t.Fatalf("Port(%v) = %d, want [%d, %d]", tc.portRange, p, tc.min, tc.max)
+			v := randomizer.Network.Value(tc.kind)
+			if v < tc.min || v > tc.max {
+				t.Fatalf("Value(%v) = %d, want [%d, %d]", tc.kind, v, tc.min, tc.max)
 			}
 		}
 	}
 }
 
-func TestNetworkVLANID(t *testing.T) {
-	for range 1000 {
-		v := randomizer.Network.VLANID()
-		if v > 4095 {
-			t.Fatalf("VLANID = %d, want [0, 4095]", v)
-		}
+func TestNetworkValueFixedProvider(t *testing.T) {
+	const value fixedProvider = 0x0123456789abcdef
+	previous := randomizer.SetProvider(value)
+	defer randomizer.SetProvider(previous)
+
+	if got, want := randomizer.Network.Value(randomizer.VLANID), uint64(0x12); got != want {
+		t.Fatalf("Value(VLANID) = 0x%x, want 0x%x", got, want)
+	}
+	if got, want := randomizer.Network.Value(randomizer.ASN), uint64(value)>>32; got != want {
+		t.Fatalf("Value(ASN) = 0x%x, want 0x%x", got, want)
+	}
+	if got, want := randomizer.Network.Value(randomizer.VNI), uint64(value)>>40; got != want {
+		t.Fatalf("Value(VNI) = 0x%x, want 0x%x", got, want)
+	}
+	if got, want := randomizer.Network.Value(randomizer.FlowLabel), uint64(value)>>44; got != want {
+		t.Fatalf("Value(FlowLabel) = 0x%x, want 0x%x", got, want)
+	}
+	if got, want := randomizer.Network.Value(randomizer.MPLSLabel), uint64(value)>>44; got != want {
+		t.Fatalf("Value(MPLSLabel) = 0x%x, want 0x%x", got, want)
+	}
+	if got, want := randomizer.Network.Value(randomizer.IPv6InterfaceID), uint64(value)&^(uint64(0x03)<<56); got != want {
+		t.Fatalf("Value(IPv6InterfaceID) = 0x%x, want 0x%x", got, want)
 	}
 }
 
-func TestNetworkUUIDv4Version(t *testing.T) {
-	uuid := randomizer.Network.UUIDv4()
+func TestNetworkUUID(t *testing.T) {
+	uuid := randomizer.Network.UUID()
 	if uuid[6]>>4 != 0x4 {
-		t.Fatalf("UUIDv4 version nibble = 0x%X, want 0x4", uuid[6]>>4)
+		t.Fatalf("UUID version nibble = 0x%x, want 0x4", uuid[6]>>4)
 	}
 	if uuid[8]>>6 != 0x2 {
-		t.Fatalf("UUIDv4 variant bits = 0x%X, want 0x2 (10xx)", uuid[8]>>6)
+		t.Fatalf("UUID variant bits = 0x%x, want 0x2", uuid[8]>>6)
 	}
 }
 
-func TestNetworkUUIDv4StringFormat(t *testing.T) {
-	s := randomizer.Network.UUIDv4String()
-	if len(s) != 36 {
-		t.Fatalf("UUIDv4String length = %d, want 36", len(s))
+func TestNetworkAppendUUID(t *testing.T) {
+	dst := []byte("id:")
+	out := randomizer.Network.AppendUUID(dst)
+	if len(out) != 39 || string(out[:3]) != "id:" {
+		t.Fatalf("AppendUUID length/prefix = %d/%q, want 39/id:", len(out), out[:3])
 	}
+	uuid := out[3:]
 	for _, pos := range []int{8, 13, 18, 23} {
-		if s[pos] != '-' {
-			t.Fatalf("UUIDv4String[%d] = %q, want '-'", pos, s[pos])
+		if uuid[pos] != '-' {
+			t.Fatalf("AppendUUID uuid[%d] = %q, want '-'", pos, uuid[pos])
 		}
 	}
-	if s[14] != '4' {
-		t.Fatalf("UUIDv4String version char = %q, want '4'", s[14])
+	if uuid[14] != '4' {
+		t.Fatalf("AppendUUID version char = %q, want '4'", uuid[14])
 	}
-	variantNibble := s[19]
-	if variantNibble != '8' && variantNibble != '9' && variantNibble != 'a' && variantNibble != 'b' {
-		t.Fatalf("UUIDv4String variant char = %q, want one of '8','9','a','b'", variantNibble)
+	if !bytes.ContainsAny(uuid[19:20], "89ab") {
+		t.Fatalf("AppendUUID variant char = %q, want one of 8, 9, a, b", uuid[19])
 	}
 }
 
-func TestNetworkIPv4CIDR(t *testing.T) {
-	cases := []uint8{0, 8, 16, 24, 32}
-	for _, prefix := range cases {
-		ipNet := randomizer.Network.IPv4CIDR(prefix)
-		if ipNet == nil {
-			t.Fatalf("IPv4CIDR(%d) returned nil", prefix)
-		}
-		if len(ipNet.IP) != net.IPv4len {
-			t.Fatalf("IPv4CIDR(%d) IP length = %d, want %d", prefix, len(ipNet.IP), net.IPv4len)
+func TestNetworkCIDR(t *testing.T) {
+	cases := []struct {
+		kind       randomizer.CIDRKind
+		prefix     uint8
+		ipLen      int
+		maskBits   int
+		maskLength int
+	}{
+		{randomizer.IPv4CIDR, 24, net.IPv4len, 24, 32},
+		{randomizer.IPv4CIDR, 40, net.IPv4len, 32, 32},
+		{randomizer.IPv6CIDR, 48, net.IPv6len, 48, 128},
+		{randomizer.IPv6CIDR, 200, net.IPv6len, 128, 128},
+	}
+	for _, tc := range cases {
+		ipNet := randomizer.Network.CIDR(tc.kind, tc.prefix)
+		if ipNet == nil || len(ipNet.IP) != tc.ipLen {
+			t.Fatalf("CIDR(%v, %d) = %v, want IP len %d", tc.kind, tc.prefix, ipNet, tc.ipLen)
 		}
 		ones, bits := ipNet.Mask.Size()
-		if ones != int(prefix) || bits != 32 {
-			t.Fatalf("IPv4CIDR(%d) mask ones=%d bits=%d", prefix, ones, bits)
+		if ones != tc.maskBits || bits != tc.maskLength {
+			t.Fatalf("CIDR(%v, %d) mask = %d/%d, want %d/%d", tc.kind, tc.prefix, ones, bits, tc.maskBits, tc.maskLength)
 		}
 		for i, b := range ipNet.IP {
 			if b&^ipNet.Mask[i] != 0 {
-				t.Fatalf("IPv4CIDR(%d) host bits not zeroed in IP byte %d", prefix, i)
+				t.Fatalf("CIDR(%v, %d) host bit set in byte %d", tc.kind, tc.prefix, i)
 			}
 		}
 	}
 }
 
-func TestNetworkIPv6CIDR(t *testing.T) {
-	cases := []uint8{0, 32, 48, 64, 128}
-	for _, prefix := range cases {
-		ipNet := randomizer.Network.IPv6CIDR(prefix)
-		if ipNet == nil {
-			t.Fatalf("IPv6CIDR(%d) returned nil", prefix)
+func TestNetworkIPv6ULAPrefix(t *testing.T) {
+	ipNet := randomizer.Network.CIDR(randomizer.IPv6ULAPrefix, 0)
+	if ipNet == nil || len(ipNet.IP) != net.IPv6len || ipNet.IP[0] != 0xfd || ipNet.IP.To4() != nil {
+		t.Fatalf("CIDR(IPv6ULAPrefix) = %v, want fd00::/8 IPv6", ipNet)
+	}
+	for i := 6; i < net.IPv6len; i++ {
+		if ipNet.IP[i] != 0 {
+			t.Fatalf("CIDR(IPv6ULAPrefix) host bit set in byte %d", i)
 		}
-		if len(ipNet.IP) != net.IPv6len {
-			t.Fatalf("IPv6CIDR(%d) IP length = %d, want %d", prefix, len(ipNet.IP), net.IPv6len)
-		}
-		ones, bits := ipNet.Mask.Size()
-		if ones != int(prefix) || bits != 128 {
-			t.Fatalf("IPv6CIDR(%d) mask ones=%d bits=%d", prefix, ones, bits)
-		}
-		for i, b := range ipNet.IP {
-			if b&^ipNet.Mask[i] != 0 {
-				t.Fatalf("IPv6CIDR(%d) host bits not zeroed in IP byte %d", prefix, i)
-			}
-		}
+	}
+	ones, bits := ipNet.Mask.Size()
+	if ones != 48 || bits != 128 {
+		t.Fatalf("CIDR(IPv6ULAPrefix) mask = %d/%d, want 48/128", ones, bits)
 	}
 }
 
-func TestNetworkIPv4AddrInCIDR(t *testing.T) {
-	_, ipNet, _ := net.ParseCIDR("192.168.1.0/24")
+func TestNetworkIPInCIDR(t *testing.T) {
+	_, ip4Net, _ := net.ParseCIDR("192.168.1.0/24")
+	_, ip6Net, _ := net.ParseCIDR("2001:db8::/32")
 	for range 100 {
-		ip := randomizer.Network.IPv4AddrInCIDR(ipNet)
-		if ip == nil {
-			t.Fatal("IPv4AddrInCIDR returned nil")
+		var buf [16]byte
+		ip4 := randomizer.Network.IPInCIDR(buf[:0], ip4Net)
+		if ip4 == nil || !ip4Net.Contains(ip4) || &ip4[0] != &buf[0] {
+			t.Fatalf("IPInCIDR IPv4 = %v, want address inside %v using caller buffer", ip4, ip4Net)
 		}
-		if !ipNet.Contains(ip) {
-			t.Fatalf("IPv4AddrInCIDR returned %v, not in %v", ip, ipNet)
-		}
-	}
-}
-
-func TestNetworkIPv6AddrInCIDR(t *testing.T) {
-	_, ipNet, _ := net.ParseCIDR("2001:db8::/32")
-	for range 100 {
-		ip := randomizer.Network.IPv6AddrInCIDR(ipNet)
-		if ip == nil {
-			t.Fatal("IPv6AddrInCIDR returned nil")
-		}
-		if !ipNet.Contains(ip) {
-			t.Fatalf("IPv6AddrInCIDR returned %v, not in %v", ip, ipNet)
+		ip6 := randomizer.Network.IPInCIDR(buf[:0], ip6Net)
+		if ip6 == nil || !ip6Net.Contains(ip6) || &ip6[0] != &buf[0] {
+			t.Fatalf("IPInCIDR IPv6 = %v, want address inside %v using caller buffer", ip6, ip6Net)
 		}
 	}
-}
-
-func TestNetworkEUI64Bits(t *testing.T) {
-	eui := randomizer.Network.EUI64()
-	if len(eui) != 8 {
-		t.Fatalf("EUI64 length = %d, want 8", len(eui))
-	}
-	if eui[0]&0x02 == 0 {
-		t.Fatal("EUI64 U/L bit not set (should be locally administered)")
-	}
-	if eui[0]&0x01 != 0 {
-		t.Fatal("EUI64 I/G bit set (should be unicast)")
+	if got := randomizer.Network.IPInCIDR(nil, nil); got != nil {
+		t.Fatalf("IPInCIDR(nil) = %v, want nil", got)
 	}
 }
 
-func TestNetworkEUI64FromMAC(t *testing.T) {
-	mac := net.HardwareAddr{0x00, 0x1A, 0x2B, 0x3C, 0x4D, 0x5E}
-	eui := randomizer.Network.EUI64FromMAC(mac)
-	if len(eui) != 8 {
-		t.Fatalf("EUI64FromMAC length = %d, want 8", len(eui))
+func TestNetworkAllocs(t *testing.T) {
+	if allocs := testing.AllocsPerRun(1000, func() {
+		var buf [16]byte
+		ip := randomizer.Network.IP(buf[:0], randomizer.IPv6Any)
+		if len(ip) != net.IPv6len {
+			t.Fatal("bad IPv6 length")
+		}
+	}); allocs != 0 {
+		t.Fatalf("IP with caller buffer allocs/op = %v, want 0", allocs)
 	}
-	if eui[0] != mac[0]^0x02 || eui[1] != mac[1] || eui[2] != mac[2] {
-		t.Fatalf("EUI64FromMAC OUI mismatch: got %X %X %X", eui[0], eui[1], eui[2])
+	if allocs := testing.AllocsPerRun(1000, func() {
+		var buf [8]byte
+		mac := randomizer.Network.Hardware(buf[:0], randomizer.HardwareEUI64, randomizer.HardwareOptions{})
+		if len(mac) != 8 {
+			t.Fatal("bad EUI64 length")
+		}
+	}); allocs != 0 {
+		t.Fatalf("Hardware with caller buffer allocs/op = %v, want 0", allocs)
 	}
-	if eui[3] != 0xFF || eui[4] != 0xFE {
-		t.Fatalf("EUI64FromMAC FFFE bytes = 0x%02X 0x%02X, want 0xFF 0xFE", eui[3], eui[4])
+	if allocs := testing.AllocsPerRun(1000, func() {
+		var buf [36]byte
+		out := randomizer.Network.AppendUUID(buf[:0])
+		if len(out) != 36 {
+			t.Fatal("bad UUID text length")
+		}
+	}); allocs != 0 {
+		t.Fatalf("AppendUUID with caller buffer allocs/op = %v, want 0", allocs)
 	}
-	if eui[5] != mac[3] || eui[6] != mac[4] || eui[7] != mac[5] {
-		t.Fatalf("EUI64FromMAC NIC octets mismatch")
+	if allocs := testing.AllocsPerRun(1000, func() {
+		benchValue = randomizer.Network.Value(randomizer.ASN)
+	}); allocs != 0 {
+		t.Fatalf("Value allocs/op = %v, want 0", allocs)
 	}
-	if randomizer.Network.EUI64FromMAC(net.HardwareAddr{0x00}) != nil {
-		t.Fatal("EUI64FromMAC with invalid MAC should return nil")
+	if allocs := testing.AllocsPerRun(1000, func() {
+		benchUUID = randomizer.Network.UUID()
+	}); allocs != 0 {
+		t.Fatalf("UUID allocs/op = %v, want 0", allocs)
+	}
+	if allocs := testing.AllocsPerRun(1000, func() {
+		benchIPNet = randomizer.Network.CIDR(randomizer.IPv6ULAPrefix, 0)
+	}); allocs > 1 {
+		t.Fatalf("CIDR(IPv6ULAPrefix) allocs/op = %v, want <= 1", allocs)
 	}
 }
 
-var (
-	benchPort  uint16
-	benchUUID  [16]byte
-	benchUUIDS string
-	benchIPNet *net.IPNet
-)
-
-func BenchmarkNetworkPort(b *testing.B) {
+func BenchmarkNetworkIPIPv4(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
-		benchPort = randomizer.Network.Port(randomizer.AnyPort)
+		benchIP = randomizer.Network.IP(nil, randomizer.IPv4Any)
 	}
 }
 
-func BenchmarkNetworkEphemeralPort(b *testing.B) {
+func BenchmarkNetworkIPIPv4Buffered(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
-		benchPort = randomizer.Network.Port(randomizer.EphemeralPort)
+		benchIP = randomizer.Network.IP(benchBuffer[:0], randomizer.IPv4Any)
 	}
 }
 
-func BenchmarkNetworkUUIDv4(b *testing.B) {
+func BenchmarkNetworkIPIPv6(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
-		benchUUID = randomizer.Network.UUIDv4()
+		benchIP = randomizer.Network.IP(nil, randomizer.IPv6Any)
 	}
 }
 
-func BenchmarkNetworkUUIDv4String(b *testing.B) {
+func BenchmarkNetworkHardwareMAC(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
-		benchUUIDS = randomizer.Network.UUIDv4String()
+		benchMAC = randomizer.Network.Hardware(nil, randomizer.HardwareMAC, randomizer.HardwareOptions{
+			Local:     true,
+			Multicast: false,
+		})
 	}
 }
 
-func BenchmarkNetworkIPv4CIDR(b *testing.B) {
+func BenchmarkNetworkHardwareMACBuffered(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
-		benchIPNet = randomizer.Network.IPv4CIDR(24)
+		benchMAC = randomizer.Network.Hardware(benchBuffer[:0], randomizer.HardwareMAC, randomizer.HardwareOptions{
+			Local:     true,
+			Multicast: false,
+		})
 	}
 }
 
-func BenchmarkNetworkEUI64(b *testing.B) {
+func BenchmarkNetworkValuePort(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
-		benchMAC = randomizer.Network.EUI64()
+		benchPort = randomizer.Network.Value(randomizer.AnyPort)
+	}
+}
+
+func BenchmarkNetworkValueASN(b *testing.B) {
+	b.ReportAllocs()
+	for b.Loop() {
+		benchValue = randomizer.Network.Value(randomizer.ASN)
+	}
+}
+
+func BenchmarkNetworkUUID(b *testing.B) {
+	b.ReportAllocs()
+	for b.Loop() {
+		benchUUID = randomizer.Network.UUID()
+	}
+}
+
+func BenchmarkNetworkAppendUUID(b *testing.B) {
+	b.ReportAllocs()
+	for b.Loop() {
+		benchUUIDB = randomizer.Network.AppendUUID(nil)
+	}
+}
+
+func BenchmarkNetworkAppendUUIDBuffered(b *testing.B) {
+	b.ReportAllocs()
+	for b.Loop() {
+		benchUUIDB = randomizer.Network.AppendUUID(benchBuffer[:0])
+	}
+}
+
+func BenchmarkNetworkCIDR(b *testing.B) {
+	b.ReportAllocs()
+	for b.Loop() {
+		benchIPNet = randomizer.Network.CIDR(randomizer.IPv6CIDR, 48)
 	}
 }

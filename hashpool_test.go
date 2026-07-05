@@ -17,6 +17,10 @@ func TestHashPoolNewHashPoolZero(t *testing.T) {
 	if got := p.Sum(nil); len(got) != 8 {
 		t.Fatalf("nil pool Sum(nil) length = %d, want 8", len(got))
 	}
+	var buf [17]byte
+	if n, err := p.Read(buf[:]); n != len(buf) || err != nil {
+		t.Fatalf("nil pool Read length/error = %d/%v, want %d/nil", n, err, len(buf))
+	}
 }
 
 func TestHashPoolSumAppends8Bytes(t *testing.T) {

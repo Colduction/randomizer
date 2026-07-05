@@ -42,24 +42,92 @@ func makeAlphabet(chars string) [256]bool {
 	return allow
 }
 
+func TestWordBuiltInAlphabets(t *testing.T) {
+	const n = 4096
+	cases := []struct {
+		alphabet randomizer.Alphabet
+		chars    string
+	}{
+		{randomizer.DecimalAlphabet, "0123456789"},
+		{randomizer.HexLowerAlphabet, "0123456789abcdef"},
+		{randomizer.HexUpperAlphabet, "0123456789ABCDEF"},
+		{randomizer.OctalAlphabet, "01234567"},
+		{randomizer.LowerAlphabet, "abcdefghijklmnopqrstuvwxyz"},
+		{randomizer.UpperAlphabet, "ABCDEFGHIJKLMNOPQRSTUVWXYZ"},
+		{randomizer.AlphaAlphabet, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"},
+		{randomizer.AlphaNumericAlphabet, "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"},
+		{randomizer.Base32Alphabet, "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"},
+		{randomizer.Base64URLAlphabet, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"},
+	}
+
+	for _, tc := range cases {
+		allow := makeAlphabet(tc.chars)
+
+		s := randomizer.Word.String(tc.alphabet, n)
+		if len(s) != n {
+			t.Fatalf("String(%v) length = %d, want %d", tc.alphabet, len(s), n)
+		}
+		sb := []byte(s)
+		if !allInAlphabet(sb, allow) {
+			t.Fatalf("String(%v) produced invalid character", tc.alphabet)
+		}
+		if hasAdjacentDuplicate(sb) {
+			t.Fatalf("String(%v) produced adjacent duplicate character", tc.alphabet)
+		}
+
+		b := randomizer.Word.Bytes(tc.alphabet, n)
+		if len(b) != n {
+			t.Fatalf("Bytes(%v) length = %d, want %d", tc.alphabet, len(b), n)
+		}
+		if !allInAlphabet(b, allow) {
+			t.Fatalf("Bytes(%v) produced invalid character", tc.alphabet)
+		}
+		if hasAdjacentDuplicate(b) {
+			t.Fatalf("Bytes(%v) produced adjacent duplicate character", tc.alphabet)
+		}
+
+		var buf [n + 3]byte
+		dst := append(buf[:0], "id:"...)
+		out := randomizer.Word.Append(dst, tc.alphabet, n)
+		if len(out) != n+3 || string(out[:3]) != "id:" || &out[3] != &buf[3] {
+			t.Fatalf("Append(%v) did not preserve prefix or reuse caller buffer", tc.alphabet)
+		}
+		if !allInAlphabet(out[3:], allow) {
+			t.Fatalf("Append(%v) produced invalid character", tc.alphabet)
+		}
+		if hasAdjacentDuplicate(out[3:]) {
+			t.Fatalf("Append(%v) produced adjacent duplicate character", tc.alphabet)
+		}
+	}
+}
+
 func TestWordZeroLength(t *testing.T) {
-	if got := randomizer.Word.Decimal(0); got != "" {
-		t.Fatalf("Decimal(0) = %q, want empty string", got)
+	if got := randomizer.Word.String(randomizer.DecimalAlphabet, 0); got != "" {
+		t.Fatalf("String(DecimalAlphabet,0) = %q, want empty string", got)
 	}
-	if got := randomizer.Word.Hex(0, false); got != "" {
-		t.Fatalf("Hex(0,false) = %q, want empty string", got)
+	if got := randomizer.Word.String(randomizer.AlphaNumericAlphabet, 0); got != "" {
+		t.Fatalf("String(AlphaNumericAlphabet,0) = %q, want empty string", got)
 	}
-	if got := randomizer.Word.Octal(0); got != "" {
-		t.Fatalf("Octal(0) = %q, want empty string", got)
+	if got := randomizer.Word.String(randomizer.HexLowerAlphabet, 0); got != "" {
+		t.Fatalf("String(HexLowerAlphabet,0) = %q, want empty string", got)
 	}
-	if got := randomizer.Word.DecimalBytes(0); got != nil {
-		t.Fatalf("DecimalBytes(0) = %v, want nil", got)
+	if got := randomizer.Word.String(randomizer.OctalAlphabet, 0); got != "" {
+		t.Fatalf("String(OctalAlphabet,0) = %q, want empty string", got)
 	}
-	if got := randomizer.Word.HexBytes(0, false); got != nil {
-		t.Fatalf("HexBytes(0,false) = %v, want nil", got)
+	if got := randomizer.Word.Bytes(randomizer.DecimalAlphabet, 0); got != nil {
+		t.Fatalf("Bytes(DecimalAlphabet,0) = %v, want nil", got)
 	}
-	if got := randomizer.Word.OctalBytes(0); got != nil {
-		t.Fatalf("OctalBytes(0) = %v, want nil", got)
+	if got := randomizer.Word.Bytes(randomizer.AlphaNumericAlphabet, 0); got != nil {
+		t.Fatalf("Bytes(AlphaNumericAlphabet,0) = %v, want nil", got)
+	}
+	if got := randomizer.Word.Append([]byte("x"), randomizer.AlphaNumericAlphabet, 0); string(got) != "x" {
+		t.Fatalf("Append zero length = %q, want %q", got, "x")
+	}
+	if got := randomizer.Word.Bytes(randomizer.HexLowerAlphabet, 0); got != nil {
+		t.Fatalf("Bytes(HexLowerAlphabet,0) = %v, want nil", got)
+	}
+	if got := randomizer.Word.Bytes(randomizer.OctalAlphabet, 0); got != nil {
+		t.Fatalf("Bytes(OctalAlphabet,0) = %v, want nil", got)
 	}
 }
 
@@ -67,7 +135,7 @@ func TestWordDecimalOutput(t *testing.T) {
 	const n = 4096
 	allow := makeAlphabet("0123456789")
 
-	s := randomizer.Word.Decimal(n)
+	s := randomizer.Word.String(randomizer.DecimalAlphabet, n)
 	if len(s) != n {
 		t.Fatalf("Decimal length = %d, want %d", len(s), n)
 	}
@@ -79,7 +147,7 @@ func TestWordDecimalOutput(t *testing.T) {
 		t.Fatal("Decimal produced adjacent duplicate character")
 	}
 
-	b := randomizer.Word.DecimalBytes(n)
+	b := randomizer.Word.Bytes(randomizer.DecimalAlphabet, n)
 	if len(b) != n {
 		t.Fatalf("DecimalBytes length = %d, want %d", len(b), n)
 	}
@@ -96,7 +164,7 @@ func TestWordHexOutput(t *testing.T) {
 	allowLower := makeAlphabet("0123456789abcdef")
 	allowUpper := makeAlphabet("0123456789ABCDEF")
 
-	sLower := randomizer.Word.Hex(n, false)
+	sLower := randomizer.Word.String(randomizer.HexLowerAlphabet, n)
 	if len(sLower) != n {
 		t.Fatalf("Hex length = %d, want %d", len(sLower), n)
 	}
@@ -108,7 +176,7 @@ func TestWordHexOutput(t *testing.T) {
 		t.Fatal("Hex lower produced adjacent duplicate character")
 	}
 
-	sUpper := randomizer.Word.Hex(n, true)
+	sUpper := randomizer.Word.String(randomizer.HexUpperAlphabet, n)
 	if len(sUpper) != n {
 		t.Fatalf("Hex uppercase length = %d, want %d", len(sUpper), n)
 	}
@@ -120,7 +188,7 @@ func TestWordHexOutput(t *testing.T) {
 		t.Fatal("Hex uppercase produced adjacent duplicate character")
 	}
 
-	bLower := randomizer.Word.HexBytes(n, false)
+	bLower := randomizer.Word.Bytes(randomizer.HexLowerAlphabet, n)
 	if len(bLower) != n {
 		t.Fatalf("HexBytes lower length = %d, want %d", len(bLower), n)
 	}
@@ -131,7 +199,7 @@ func TestWordHexOutput(t *testing.T) {
 		t.Fatal("HexBytes lower produced adjacent duplicate character")
 	}
 
-	bUpper := randomizer.Word.HexBytes(n, true)
+	bUpper := randomizer.Word.Bytes(randomizer.HexUpperAlphabet, n)
 	if len(bUpper) != n {
 		t.Fatalf("HexBytes upper length = %d, want %d", len(bUpper), n)
 	}
@@ -147,7 +215,7 @@ func TestWordOctalOutput(t *testing.T) {
 	const n = 4096
 	allow := makeAlphabet("01234567")
 
-	s := randomizer.Word.Octal(n)
+	s := randomizer.Word.String(randomizer.OctalAlphabet, n)
 	if len(s) != n {
 		t.Fatalf("Octal length = %d, want %d", len(s), n)
 	}
@@ -159,7 +227,7 @@ func TestWordOctalOutput(t *testing.T) {
 		t.Fatal("Octal produced adjacent duplicate character")
 	}
 
-	b := randomizer.Word.OctalBytes(n)
+	b := randomizer.Word.Bytes(randomizer.OctalAlphabet, n)
 	if len(b) != n {
 		t.Fatalf("OctalBytes length = %d, want %d", len(b), n)
 	}
@@ -250,11 +318,46 @@ func TestWordCustomInvalidOutput(t *testing.T) {
 	}
 }
 
+func TestWordAppendCustom(t *testing.T) {
+	const n = 256
+	const dict = "ABC123"
+	allow := makeAlphabet(dict)
+
+	var buf [n + 4]byte
+	dst := append(buf[:0], "key:"...)
+	out := randomizer.Word.AppendCustom(dst, dict, n)
+	if len(out) != n+4 || string(out[:4]) != "key:" || &out[4] != &buf[4] {
+		t.Fatal("AppendCustom did not preserve prefix or reuse caller buffer")
+	}
+	if !allInAlphabet(out[4:], allow) {
+		t.Fatal("AppendCustom produced invalid character")
+	}
+	if hasAdjacentDuplicate(out[4:]) {
+		t.Fatal("AppendCustom produced adjacent duplicate character")
+	}
+
+	fromBytes := randomizer.Word.AppendCustomFromBytes(dst[:4], []byte(dict), n)
+	if len(fromBytes) != n+4 || string(fromBytes[:4]) != "key:" || &fromBytes[4] != &buf[4] {
+		t.Fatal("AppendCustomFromBytes did not preserve prefix or reuse caller buffer")
+	}
+	if !allInAlphabet(fromBytes[4:], allow) {
+		t.Fatal("AppendCustomFromBytes produced invalid character")
+	}
+	if hasAdjacentDuplicate(fromBytes[4:]) {
+		t.Fatal("AppendCustomFromBytes produced adjacent duplicate character")
+	}
+
+	invalid := randomizer.Word.AppendCustom([]byte("x"), "AA", 2)
+	if string(invalid) != "x" {
+		t.Fatalf("AppendCustom invalid dictionary = %q, want %q", invalid, "x")
+	}
+}
+
 func BenchmarkWordDecimal(b *testing.B) {
 	const n = 256
 	b.ReportAllocs()
 	for b.Loop() {
-		benchWordString = randomizer.Word.Decimal(n)
+		benchWordString = randomizer.Word.String(randomizer.DecimalAlphabet, n)
 	}
 }
 
@@ -262,7 +365,7 @@ func BenchmarkWordDecimalBytes(b *testing.B) {
 	const n = 256
 	b.ReportAllocs()
 	for b.Loop() {
-		benchWordBytes = randomizer.Word.DecimalBytes(n)
+		benchWordBytes = randomizer.Word.Bytes(randomizer.DecimalAlphabet, n)
 	}
 }
 
@@ -270,7 +373,7 @@ func BenchmarkWordHex(b *testing.B) {
 	const n = 256
 	b.ReportAllocs()
 	for b.Loop() {
-		benchWordString = randomizer.Word.Hex(n, false)
+		benchWordString = randomizer.Word.String(randomizer.HexLowerAlphabet, n)
 	}
 }
 
@@ -278,7 +381,7 @@ func BenchmarkWordHexBytes(b *testing.B) {
 	const n = 256
 	b.ReportAllocs()
 	for b.Loop() {
-		benchWordBytes = randomizer.Word.HexBytes(n, false)
+		benchWordBytes = randomizer.Word.Bytes(randomizer.HexLowerAlphabet, n)
 	}
 }
 
@@ -286,7 +389,7 @@ func BenchmarkWordOctal(b *testing.B) {
 	const n = 256
 	b.ReportAllocs()
 	for b.Loop() {
-		benchWordString = randomizer.Word.Octal(n)
+		benchWordString = randomizer.Word.String(randomizer.OctalAlphabet, n)
 	}
 }
 
@@ -294,6 +397,31 @@ func BenchmarkWordOctalBytes(b *testing.B) {
 	const n = 256
 	b.ReportAllocs()
 	for b.Loop() {
-		benchWordBytes = randomizer.Word.OctalBytes(n)
+		benchWordBytes = randomizer.Word.Bytes(randomizer.OctalAlphabet, n)
+	}
+}
+
+func BenchmarkWordAlphaNumeric(b *testing.B) {
+	const n = 256
+	b.ReportAllocs()
+	for b.Loop() {
+		benchWordString = randomizer.Word.String(randomizer.AlphaNumericAlphabet, n)
+	}
+}
+
+func BenchmarkWordAppendAlphaNumeric(b *testing.B) {
+	const n = 256
+	buf := make([]byte, 0, n)
+	b.ReportAllocs()
+	for b.Loop() {
+		benchWordBytes = randomizer.Word.Append(buf[:0], randomizer.AlphaNumericAlphabet, n)
+	}
+}
+
+func BenchmarkWordBase64URL(b *testing.B) {
+	const n = 256
+	b.ReportAllocs()
+	for b.Loop() {
+		benchWordString = randomizer.Word.String(randomizer.Base64URLAlphabet, n)
 	}
 }

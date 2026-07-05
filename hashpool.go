@@ -1,10 +1,10 @@
 package randomizer
 
 import (
+	"encoding/binary"
 	"hash/maphash"
 	"sync"
 	"sync/atomic"
-	"unsafe"
 )
 
 // hashPool pairs a [sync.Pool] of [maphash.Hash] objects with an atomic SplitMix64
@@ -74,11 +74,25 @@ func (p *hashPool) next64() uint64 {
 	return splitMix64(p.state.Add(splitMixGamma))
 }
 
+// Read fills b with random bytes and returns len(b), nil.
+func (p *hashPool) Read(b []byte) (n int, err error) {
+	if p == nil {
+		var state atomic.Uint64
+		seed := maphash.Bytes(maphash.MakeSeed(), nil)
+		if seed == 0 {
+			seed = splitMixGamma
+		}
+		state.Store(seed)
+		fillAtomicRandomBytes(b, &state)
+		return len(b), nil
+	}
+	fillAtomicRandomBytes(b, &p.state)
+	return len(b), nil
+}
+
 // Sum implements [Provider.Sum].
 func (p *hashPool) Sum(b []byte) []byte {
-	var buf [8]byte
-	*(*uint64)(unsafe.Pointer(&buf[0])) = p.next64()
-	return append(b, buf[:]...)
+	return binary.LittleEndian.AppendUint64(b, p.next64())
 }
 
 // Sum32 implements [Provider.Sum32].

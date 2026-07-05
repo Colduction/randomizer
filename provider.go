@@ -14,6 +14,8 @@ var DefaultProvider Provider = NewHashPool(64)
 // Use [NewUint64Provider], [NewReaderProvider], or a concurrency-safe custom
 // implementation with [SetProvider].
 type Provider interface {
+	// Read fills p with random bytes and returns len(p), nil on success.
+	Read(p []byte) (n int, err error)
 	// Sum appends eight random bytes to b using the same source as
 	// [Provider.Sum32] and [Provider.Sum64].
 	Sum(b []byte) []byte
@@ -21,6 +23,23 @@ type Provider interface {
 	Sum32() uint32
 	// Sum64 returns a random 64-bit value from the provider.
 	Sum64() uint64
+}
+
+func fillAtomicRandomBytes(out []byte, state *atomic.Uint64) {
+	var (
+		i int
+		n = len(out)
+	)
+	for ; i+8 <= n; i += 8 {
+		binary.LittleEndian.PutUint64(out[i:i+8], splitMix64(state.Add(splitMixGamma)))
+	}
+	if i < n {
+		x := splitMix64(state.Add(splitMixGamma))
+		for j := i; j < n; j++ {
+			out[j] = byte(x)
+			x >>= 8
+		}
+	}
 }
 
 type uint64Provider struct {
@@ -37,6 +56,12 @@ func NewUint64Provider(source interface{ Uint64() uint64 }) Provider {
 	provider := new(uint64Provider)
 	provider.state.Store(source.Uint64())
 	return provider
+}
+
+// Read fills p with random bytes and returns len(p), nil.
+func (u64p *uint64Provider) Read(p []byte) (n int, err error) {
+	fillAtomicRandomBytes(p, &u64p.state)
+	return len(p), nil
 }
 
 // Sum appends eight random bytes to b and returns the extended slice.
@@ -68,33 +93,36 @@ func NewReaderProvider(reader io.Reader) Provider {
 	return &readerProvider{reader: reader}
 }
 
-// readFull fills b from the provider reader.
-func (rp *readerProvider) readFull(b []byte) {
-	_, err := io.ReadFull(rp.reader, b)
-	if err != nil {
-		panic(err)
-	}
+// Read fills p from the provider reader.
+func (rp *readerProvider) Read(p []byte) (n int, err error) {
+	return io.ReadFull(rp.reader, p)
 }
 
 // Sum appends eight random bytes to b and returns the extended slice.
 func (rp *readerProvider) Sum(b []byte) []byte {
 	offset := len(b)
 	b = append(b, 0, 0, 0, 0, 0, 0, 0, 0)
-	rp.readFull(b[offset:])
+	if _, err := rp.Read(b[offset:]); err != nil {
+		panic(err)
+	}
 	return b
 }
 
 // Sum32 returns a random 32-bit value.
 func (rp *readerProvider) Sum32() uint32 {
 	var b [4]byte
-	rp.readFull(b[:])
+	if _, err := rp.Read(b[:]); err != nil {
+		panic(err)
+	}
 	return binary.LittleEndian.Uint32(b[:])
 }
 
 // Sum64 returns a random 64-bit value.
 func (rp *readerProvider) Sum64() uint64 {
 	var b [8]byte
-	rp.readFull(b[:])
+	if _, err := rp.Read(b[:]); err != nil {
+		panic(err)
+	}
 	return binary.LittleEndian.Uint64(b[:])
 }
 
@@ -113,6 +141,11 @@ func SetProvider(provider Provider) Provider {
 		provider = DefaultProvider
 	}
 	return *activeProvider.Swap(&provider)
+}
+
+// Read fills p with random bytes from the active [Provider].
+func Read(p []byte) (n int, err error) {
+	return currentProvider().Read(p)
 }
 
 func currentProvider() Provider {
