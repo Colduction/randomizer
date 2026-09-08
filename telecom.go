@@ -202,8 +202,8 @@ func appendRandomDigits(dst []byte, n int, p Provider) []byte {
 func luhnCheckDigit(payload []byte) byte {
 	sum := 0
 	double := true
-	for i := len(payload) - 1; i >= 0; i-- {
-		v := int(payload[i] - '0')
+	for _, p := range slices.Backward(payload) {
+		v := int(p - '0')
 		if double {
 			v *= 2
 			if v > 9 {
