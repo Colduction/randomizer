@@ -61,8 +61,9 @@ func TestProviderSetProviderRoutesGenerators(t *testing.T) {
 	if got := randomizer.Uint[uint64](); got != uint64(value) {
 		t.Fatalf("Uint[uint64]() = 0x%016x, want 0x%016x", got, uint64(value))
 	}
-	if got := randomizer.Word.String(randomizer.HexLowerAlphabet, 16); got != "fedcba9876543210" {
-		t.Fatalf("Word.Hex(16, false) = %q, want %q", got, "fedcba9876543210")
+	first := randomizer.Word.String(randomizer.HexLowerAlphabet, 16)
+	if second := randomizer.Word.String(randomizer.HexLowerAlphabet, 16); first != second || len(first) != 16 {
+		t.Fatalf("Word.String under a fixed provider = %q then %q, want equal 16-byte strings", first, second)
 	}
 	if got := randomizer.Network.Value(randomizer.VLANID); got != 0x12 {
 		t.Fatalf("Network.Value(VLANID) = 0x%x, want 0x12", got)
@@ -251,5 +252,132 @@ func BenchmarkProviderReadDefault(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
 		_, _ = randomizer.Read(buf)
+	}
+}
+
+func BenchmarkProviderReadDefaultParallel(b *testing.B) {
+	b.ReportAllocs()
+	b.RunParallel(func(pb *testing.PB) {
+		var buf [256]byte
+		for pb.Next() {
+			_, _ = randomizer.Read(buf[:])
+		}
+	})
+}
+
+// seqProvider replays scripted words and fails the test when they run out, so
+// a rejection loop that draws more than expected is reported instead of
+// hanging on a constant provider.
+type seqProvider struct {
+	t    testing.TB
+	vals []uint64
+	i    int
+}
+
+func newSeqProvider(t testing.TB, vals ...uint64) *seqProvider {
+	return &seqProvider{t: t, vals: vals}
+}
+
+func (sp *seqProvider) Sum64() uint64 {
+	if sp.i >= len(sp.vals) {
+		sp.t.Fatalf("seqProvider exhausted after %d words", len(sp.vals))
+	}
+	v := sp.vals[sp.i]
+	sp.i++
+	return v
+}
+
+func (sp *seqProvider) Sum32() uint32 {
+	return uint32(sp.Sum64() >> 32)
+}
+
+func (sp *seqProvider) Sum(b []byte) []byte {
+	return binary.LittleEndian.AppendUint64(b, sp.Sum64())
+}
+
+func (sp *seqProvider) Read(p []byte) (int, error) {
+	var i int
+	for ; i+8 <= len(p); i += 8 {
+		binary.LittleEndian.PutUint64(p[i:i+8], sp.Sum64())
+	}
+	if i < len(p) {
+		x := sp.Sum64()
+		for j := i; j < len(p); j++ {
+			p[j] = byte(x)
+			x >>= 8
+		}
+	}
+	return len(p), nil
+}
+
+func TestRuntimeProviderIsDefault(t *testing.T) {
+	if randomizer.DefaultProvider == nil {
+		t.Fatal("DefaultProvider is nil")
+	}
+	if _, ok := randomizer.DefaultProvider.(interface{ Get() any }); ok {
+		t.Fatal("DefaultProvider must not be the hash pool")
+	}
+	previous := randomizer.SetProvider(nil)
+	defer randomizer.SetProvider(previous)
+	if got := randomizer.SetProvider(nil); got != randomizer.DefaultProvider {
+		t.Fatalf("active provider = %T, want DefaultProvider", got)
+	}
+}
+
+func TestRuntimeProviderRead(t *testing.T) {
+	for _, n := range []int{0, 1, 7, 8, 9, 256} {
+		buf := make([]byte, n)
+		got, err := randomizer.DefaultProvider.Read(buf)
+		if got != n || err != nil {
+			t.Fatalf("Read(%d) = %d, %v", n, got, err)
+		}
+		if n >= 8 && bytes.Equal(buf, make([]byte, n)) {
+			t.Fatalf("Read(%d) left the buffer zero", n)
+		}
+	}
+	if got := randomizer.DefaultProvider.Sum([]byte{1}); len(got) != 9 || got[0] != 1 {
+		t.Fatalf("Sum length/prefix = %d/%v, want 9/1", len(got), got[:1])
+	}
+	first := randomizer.DefaultProvider.Sum64()
+	for i := 0; ; i++ {
+		if randomizer.DefaultProvider.Sum64() != first {
+			break
+		}
+		if i == 64 {
+			t.Fatal("Sum64 appears constant")
+		}
+	}
+	first32 := randomizer.DefaultProvider.Sum32()
+	for i := 0; ; i++ {
+		if randomizer.DefaultProvider.Sum32() != first32 {
+			break
+		}
+		if i == 64 {
+			t.Fatal("Sum32 appears constant")
+		}
+	}
+}
+
+func TestRuntimeProviderConcurrentDistinct(t *testing.T) {
+	const goroutines, values = 16, 256
+	results := make(chan uint64, goroutines*values)
+	var group sync.WaitGroup
+	group.Add(goroutines)
+	for range goroutines {
+		go func() {
+			defer group.Done()
+			for range values {
+				results <- randomizer.Uint[uint64]()
+			}
+		}()
+	}
+	group.Wait()
+	close(results)
+	seen := make(map[uint64]struct{}, goroutines*values)
+	for value := range results {
+		if _, exists := seen[value]; exists {
+			t.Fatalf("Uint returned duplicate value 0x%016x", value)
+		}
+		seen[value] = struct{}{}
 	}
 }

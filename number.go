@@ -17,24 +17,41 @@ type UnsignedIntegers interface {
 	~uint8 | ~uint16 | ~uint | ~uint32 | ~uint64 | ~uintptr
 }
 
-// uniformUint64n returns a uniform random value in [0, n) using Lemire's algorithm.
-// The common case requires one multiplication; a rejection loop runs with probability < 1/n.
-func uniformUint64n(n uint64, provider Provider) uint64 {
-	if n == 0 {
-		return 0
+const (
+	signMask uint64 = 1 << 63
+
+	inv24 float32 = 1.0 / (1 << 24)
+	inv53 float64 = 1.0 / (1 << 53)
+)
+
+// boundedFrom maps the random word x to a uniform value in [0, n) with
+// Lemire's nearly divisionless method (ACM TOMACS 2019): one 64x64 multiply
+// in the common case. It draws further words from p only when the low product
+// half falls below n, which happens with probability under n/2^64.
+// It returns 0 when n == 0.
+func boundedFrom(x, n uint64, p Provider) uint64 {
+	if hi, lo := bits.Mul64(x, n); lo >= n {
+		return hi
 	}
-	var (
-		x      uint64 = provider.Sum64()
-		hi, lo uint64 = bits.Mul64(x, n)
-	)
-	if lo < n {
-		threshold := (-n) % n
-		for lo < threshold {
-			x = provider.Sum64()
-			hi, lo = bits.Mul64(x, n)
-		}
+	return boundedSlow(x, n, p)
+}
+
+// boundedSlow finishes [boundedFrom] with the one division and rejection loop
+// that the fast path avoids. It stays out of line so boundedFrom inlines.
+//
+//go:noinline
+func boundedSlow(x, n uint64, p Provider) uint64 {
+	threshold := -n % n
+	hi, lo := bits.Mul64(x, n)
+	for lo < threshold {
+		hi, lo = bits.Mul64(p.Sum64(), n)
 	}
 	return hi
+}
+
+// uniformUint64n returns a uniform random value in [0, n) drawn from p.
+func uniformUint64n(n uint64, p Provider) uint64 {
+	return boundedFrom(p.Sum64(), n, p)
 }
 
 // Int returns a random integer constrained by [SignedIntegers].
@@ -51,16 +68,11 @@ func IntInterval[T SignedIntegers](min, max T) T {
 	if min > max {
 		min, max = max, min
 	}
-
-	// Map signed values to a monotonic unsigned domain.
-	const signMask = uint64(1) << 63
 	var (
 		minU = uint64(int64(min)) ^ signMask
 		maxU = uint64(int64(max)) ^ signMask
-		span = maxU - minU
 	)
-
-	v := uniformUint64n(span, currentProvider())
+	v := uniformUint64n(maxU-minU, currentProvider())
 	return T(int64((minU + v) ^ signMask))
 }
 
@@ -78,20 +90,17 @@ func UintInterval[T UnsignedIntegers](min, max T) T {
 	if min > max {
 		min, max = max, min
 	}
-	v := uniformUint64n(uint64(max-min), currentProvider())
-	return min + T(v)
+	return min + T(uniformUint64n(uint64(max-min), currentProvider()))
 }
 
 // Float32 returns a uniformly distributed random float32 in [0, 1) using the
 // active [Provider].
 func Float32() float32 {
-	const inv24 float32 = float32(1.0 / (1 << 24))
 	return float32(currentProvider().Sum32()>>8) * inv24
 }
 
 // Float64 returns a uniformly distributed random float64 in [0, 1) using the
 // active [Provider].
 func Float64() float64 {
-	const inv53 float64 = float64(1.0 / (1 << 53))
 	return float64(currentProvider().Sum64()>>11) * inv53
 }

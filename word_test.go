@@ -1,6 +1,7 @@
 package randomizer_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/colduction/randomizer-go"
@@ -423,5 +424,124 @@ func BenchmarkWordBase64URL(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
 		benchWordString = randomizer.Word.String(randomizer.Base64URLAlphabet, n)
+	}
+}
+
+func BenchmarkWordLower(b *testing.B) {
+	b.ReportAllocs()
+	for b.Loop() {
+		benchWordString = randomizer.Word.String(randomizer.LowerAlphabet, 256)
+	}
+}
+
+func BenchmarkWordAlphaNumeric16(b *testing.B) {
+	b.ReportAllocs()
+	for b.Loop() {
+		benchWordString = randomizer.Word.String(randomizer.AlphaNumericAlphabet, 16)
+	}
+}
+
+func BenchmarkWordCustom(b *testing.B) {
+	b.ReportAllocs()
+	for b.Loop() {
+		benchWordString = randomizer.Word.Custom("AABCXYZ9", 256)
+	}
+}
+
+func BenchmarkWordAppendAlphaNumericParallel(b *testing.B) {
+	b.ReportAllocs()
+	b.RunParallel(func(pb *testing.PB) {
+		var buf [256]byte
+		for pb.Next() {
+			_ = randomizer.Word.Append(buf[:0], randomizer.AlphaNumericAlphabet, 256)
+		}
+	})
+}
+
+func TestWordSmallDictionaries(t *testing.T) {
+	if got := randomizer.Word.Custom("A", 1); got != "A" {
+		t.Fatalf("Custom(A, 1) = %q, want A", got)
+	}
+	ab := randomizer.Word.Custom("AB", 64)
+	if len(ab) != 64 || hasAdjacentDuplicate([]byte(ab)) || !strings.Contains(ab, "A") || !strings.Contains(ab, "B") {
+		t.Fatalf("Custom(AB, 64) = %q, want alternating A and B", ab)
+	}
+	for range 1000 {
+		if got := randomizer.Word.Custom("AAB", 2); got == "AA" || len(got) != 2 {
+			t.Fatalf("Custom(AAB, 2) = %q", got)
+		}
+	}
+	abc := randomizer.Word.Custom("ABC", 4096)
+	if hasAdjacentDuplicate([]byte(abc)) || !allInAlphabet([]byte(abc), makeAlphabet("ABC")) {
+		t.Fatal("Custom(ABC) produced invalid output")
+	}
+}
+
+func TestWordWeightedDictionaryNoAdjacent(t *testing.T) {
+	const n = 100000
+	out := randomizer.Word.CustomBytes([]byte("AABC"), n)
+	if len(out) != n || hasAdjacentDuplicate(out) || !allInAlphabet(out, makeAlphabet("ABC")) {
+		t.Fatal("CustomBytes(AABC) produced invalid output")
+	}
+	var counts [256]int
+	for _, c := range out {
+		counts[c]++
+	}
+	// After A the next byte is B or C with equal odds; after B or C the
+	// next byte is A with probability 2/3. The stationary distribution of
+	// that chain is A 40%, B 30%, C 30%.
+	within := func(count, want int) bool { return count > want*97/100 && count < want*103/100 }
+	if !within(counts['A'], n*4/10) || !within(counts['B'], n*3/10) || !within(counts['C'], n*3/10) {
+		t.Fatalf("CustomBytes(AABC) counts A=%d B=%d C=%d, want 40%%/30%%/30%%", counts['A'], counts['B'], counts['C'])
+	}
+}
+
+func TestWordLargeDictionary(t *testing.T) {
+	dict := make([]byte, 300)
+	for i := range dict {
+		dict[i] = byte(i)
+	}
+	out := randomizer.Word.CustomBytes(dict, 4096)
+	if len(out) != 4096 || hasAdjacentDuplicate(out) {
+		t.Fatal("CustomBytes(300-byte dictionary) produced invalid output")
+	}
+}
+
+func TestWordUniformity(t *testing.T) {
+	const n = 200000
+	cases := []struct {
+		alphabet randomizer.Alphabet
+		chars    string
+	}{
+		{randomizer.DecimalAlphabet, "0123456789"},
+		{randomizer.LowerAlphabet, "abcdefghijklmnopqrstuvwxyz"},
+		{randomizer.AlphaAlphabet, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"},
+		{randomizer.AlphaNumericAlphabet, "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"},
+		{randomizer.HexLowerAlphabet, "0123456789abcdef"},
+	}
+	for _, tc := range cases {
+		var counts [256]int
+		for _, c := range randomizer.Word.Bytes(tc.alphabet, n) {
+			counts[c]++
+		}
+		mean := n / len(tc.chars)
+		for i := 0; i < len(tc.chars); i++ {
+			if c := counts[tc.chars[i]]; c < mean*9/10 || c > mean*11/10 {
+				t.Fatalf("alphabet %v symbol %q count %d, want within 10%% of %d", tc.alphabet, tc.chars[i], c, mean)
+			}
+		}
+	}
+}
+
+func TestWordFixedProviderLanes(t *testing.T) {
+	// All-one lanes select the last position, then alternate with the one
+	// before it through the skip mapping.
+	previous := randomizer.SetProvider(fixedProvider(^uint64(0)))
+	defer randomizer.SetProvider(previous)
+	if got := randomizer.Word.String(randomizer.DecimalAlphabet, 6); got != "989898" {
+		t.Fatalf("Decimal with all-one lanes = %q, want 989898", got)
+	}
+	if got := randomizer.Word.Custom("xyz", 5); got != "zyzyz" {
+		t.Fatalf("Custom(xyz) with all-one lanes = %q, want zyzyz", got)
 	}
 }

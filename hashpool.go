@@ -7,8 +7,9 @@ import (
 	"sync/atomic"
 )
 
-// hashPool pairs a [sync.Pool] of [maphash.Hash] objects with an atomic SplitMix64
-// counter used as the package's primary lock-free PRNG.
+// hashPool pairs a [sync.Pool] of [maphash.Hash] objects with an atomic
+// SplitMix64 counter. It is an opt-in [Provider]; [DefaultProvider] uses the
+// runtime generator instead.
 type hashPool struct {
 	pool  sync.Pool
 	state atomic.Uint64
@@ -66,8 +67,8 @@ func (p *hashPool) Put(h *maphash.Hash) {
 	p.pool.Put(h)
 }
 
-// next64 returns the next random 64-bit value from the pool's SplitMix64 stream.
-func (p *hashPool) next64() uint64 {
+// nextSplitMix64 returns the next value from the pool's SplitMix64 stream.
+func (p *hashPool) nextSplitMix64() uint64 {
 	if p == nil {
 		return splitMix64(maphash.Bytes(maphash.MakeSeed(), nil) + splitMixGamma)
 	}
@@ -92,15 +93,15 @@ func (p *hashPool) Read(b []byte) (n int, err error) {
 
 // Sum implements [Provider.Sum].
 func (p *hashPool) Sum(b []byte) []byte {
-	return binary.LittleEndian.AppendUint64(b, p.next64())
+	return binary.LittleEndian.AppendUint64(b, p.nextSplitMix64())
 }
 
 // Sum32 implements [Provider.Sum32].
 func (p *hashPool) Sum32() uint32 {
-	return uint32(p.next64() >> 32)
+	return uint32(p.nextSplitMix64() >> 32)
 }
 
 // Sum64 implements [Provider.Sum64].
 func (p *hashPool) Sum64() uint64 {
-	return p.next64()
+	return p.nextSplitMix64()
 }

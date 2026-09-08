@@ -4,11 +4,24 @@ import (
 	"encoding/binary"
 	"io"
 	"sync/atomic"
+	_ "unsafe" // for go:linkname
 )
 
+// runtimeRand returns a random 64-bit value from the Go runtime's per-thread
+// ChaCha8 generator, the source behind the math/rand/v2 top-level functions.
+// It never locks: every OS thread owns its own state, so throughput scales
+// linearly with the number of threads.
+//
+//go:linkname runtimeRand runtime.rand
+func runtimeRand() uint64
+
 // DefaultProvider is the package-level [Provider] restored by [SetProvider]
-// when no custom provider is supplied.
-var DefaultProvider Provider = NewHashPool(64)
+// when no custom provider is supplied. It draws from the Go runtime's
+// per-thread ChaCha8 generator (the design described in "Secure Randomness in
+// Go 1.22"): lock-free under any level of concurrency, seeded by the operating
+// system, and not reproducible. Use [NewUint64Provider] or [NewReaderProvider]
+// for seeded or cryptographic sources.
+var DefaultProvider Provider = runtimeProvider{}
 
 // Provider supplies random bytes and integer values to package generators.
 // Use [NewUint64Provider], [NewReaderProvider], or a concurrency-safe custom
@@ -25,20 +38,81 @@ type Provider interface {
 	Sum64() uint64
 }
 
+// runtimeProvider implements [Provider] over [runtimeRand]. It must stay an
+// empty comparable struct: callers compare it against [DefaultProvider]
+// through the interface.
+type runtimeProvider struct{}
+
+// Read fills p with random bytes and returns len(p), nil.
+func (runtimeProvider) Read(p []byte) (n int, err error) {
+	fillRuntimeBytes(p)
+	return len(p), nil
+}
+
+// Sum appends eight random bytes to b and returns the extended slice.
+func (runtimeProvider) Sum(b []byte) []byte {
+	return binary.LittleEndian.AppendUint64(b, runtimeRand())
+}
+
+// Sum32 returns a random 32-bit value.
+func (runtimeProvider) Sum32() uint32 {
+	return uint32(runtimeRand() >> 32)
+}
+
+// Sum64 returns a random 64-bit value.
+func (runtimeProvider) Sum64() uint64 {
+	return runtimeRand()
+}
+
+// isRuntime reports whether p is the runtime provider. Loops hoist the check
+// and call [runtimeRand] directly, skipping the interface dispatch per word.
+func isRuntime(p Provider) bool {
+	_, ok := p.(runtimeProvider)
+	return ok
+}
+
+// putTail writes the low len(out) bytes of x into out, little-endian.
+// len(out) must be at most 8.
+func putTail(out []byte, x uint64) {
+	for i := range out {
+		out[i] = byte(x)
+		x >>= 8
+	}
+}
+
+func fillRuntimeBytes(out []byte) {
+	i := 0
+	for ; i+8 <= len(out); i += 8 {
+		binary.LittleEndian.PutUint64(out[i:i+8], runtimeRand())
+	}
+	if i < len(out) {
+		putTail(out[i:], runtimeRand())
+	}
+}
+
+// fillRandomBytes fills out from p, eight bytes per word. It never hands out
+// to an interface method, so callers may pass stack buffers.
+func fillRandomBytes(out []byte, p Provider) {
+	if isRuntime(p) {
+		fillRuntimeBytes(out)
+		return
+	}
+	i := 0
+	for ; i+8 <= len(out); i += 8 {
+		binary.LittleEndian.PutUint64(out[i:i+8], p.Sum64())
+	}
+	if i < len(out) {
+		putTail(out[i:], p.Sum64())
+	}
+}
+
 func fillAtomicRandomBytes(out []byte, state *atomic.Uint64) {
-	var (
-		i int
-		n = len(out)
-	)
-	for ; i+8 <= n; i += 8 {
+	i := 0
+	for ; i+8 <= len(out); i += 8 {
 		binary.LittleEndian.PutUint64(out[i:i+8], splitMix64(state.Add(splitMixGamma)))
 	}
-	if i < n {
-		x := splitMix64(state.Add(splitMixGamma))
-		for j := i; j < n; j++ {
-			out[j] = byte(x)
-			x >>= 8
-		}
+	if i < len(out) {
+		putTail(out[i:], splitMix64(state.Add(splitMixGamma)))
 	}
 }
 
@@ -46,8 +120,10 @@ type uint64Provider struct {
 	state atomic.Uint64
 }
 
-// NewUint64Provider returns a lock-free [Provider] seeded once from a source
-// such as [math/rand.Rand] or [math/rand/v2.Source].
+// NewUint64Provider returns a seeded [Provider] that advances one shared
+// SplitMix64 counter from source.Uint64(), called once. Values are
+// reproducible for equal seeds; the shared counter serializes concurrent
+// callers on one cache line, unlike [DefaultProvider].
 // Pass the result to [SetProvider]. It returns nil when source is nil.
 func NewUint64Provider(source interface{ Uint64() uint64 }) Provider {
 	if source == nil {

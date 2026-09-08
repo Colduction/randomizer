@@ -1,6 +1,7 @@
 package randomizer
 
 import (
+	"math/bits"
 	"slices"
 	"unsafe"
 )
@@ -50,29 +51,63 @@ const (
 	Base64URLAlphabet
 )
 
-func alphabetData(alphabet Alphabet) (string, uint8) {
-	switch alphabet {
-	case HexLowerAlphabet:
-		return lhexdict, 4
-	case HexUpperAlphabet:
-		return uhexdict, 4
-	case OctalAlphabet:
-		return octi, 3
-	case LowerAlphabet:
-		return lower, 0
-	case UpperAlphabet:
-		return upper, 0
-	case AlphaAlphabet:
-		return alpha, 0
-	case AlphaNumericAlphabet:
-		return alnum, 0
-	case Base32Alphabet:
-		return base32, 5
-	case Base64URLAlphabet:
-		return base64u, 6
-	default:
-		return deci, 0
+// batchSpec describes how many uniform base-n positions one 64-bit word
+// yields with the batched method of Brackett-Rozinsky and Lemire (Software:
+// Practice and Experience, 2024): k successive multiplications by n peel k
+// digits from the word, and the word is rejected when the final low product
+// half falls below 2^64 mod n^k, which keeps every digit exactly uniform.
+type batchSpec struct {
+	prod uint64 // n^k
+	k    uint8
+}
+
+// newBatchSpec returns the batch for base n: the largest k with n^k <= 2^64,
+// reduced while more than one word in sixteen would be rejected.
+func newBatchSpec(n uint64) batchSpec {
+	if n < 2 {
+		return batchSpec{prod: 1, k: 64}
 	}
+	prod, k := uint64(1), uint8(0)
+	for {
+		hi, lo := bits.Mul64(prod, n)
+		if hi != 0 {
+			break
+		}
+		prod, k = lo, k+1
+	}
+	for k > 1 && -prod%prod > 1<<60 {
+		prod, k = prod/n, k-1
+	}
+	return batchSpec{prod: prod, k: k}
+}
+
+// batchSpecs holds the batch for every base up to 256, indexed by base.
+var batchSpecs = func() (specs [257]batchSpec) {
+	for n := range specs {
+		specs[n] = newBatchSpec(uint64(n))
+	}
+	return specs
+}()
+
+// alphabets holds the built-in dictionaries indexed by [Alphabet].
+var alphabets = [...]string{
+	DecimalAlphabet:      deci,
+	HexLowerAlphabet:     lhexdict,
+	HexUpperAlphabet:     uhexdict,
+	OctalAlphabet:        octi,
+	LowerAlphabet:        lower,
+	UpperAlphabet:        upper,
+	AlphaAlphabet:        alpha,
+	AlphaNumericAlphabet: alnum,
+	Base32Alphabet:       base32,
+	Base64URLAlphabet:    base64u,
+}
+
+func alphabetData(alphabet Alphabet) string {
+	if int(alphabet) < len(alphabets) {
+		return alphabets[alphabet]
+	}
+	return deci
 }
 
 // String returns a random string of the given length from alphabet.
@@ -92,8 +127,7 @@ func (word) Bytes(alphabet Alphabet, length int) []byte {
 		return nil
 	}
 	out := make([]byte, length)
-	dict, bits := alphabetData(alphabet)
-	fillAlphabetNoRepeat(out, dict, bits, currentProvider())
+	fillBatchedNoRepeat(out, alphabetData(alphabet), currentProvider())
 	return out
 }
 
@@ -105,8 +139,7 @@ func (word) Append(dst []byte, alphabet Alphabet, length int) []byte {
 	}
 	offset := len(dst)
 	dst = slices.Grow(dst, length)[:offset+length]
-	dict, bits := alphabetData(alphabet)
-	fillAlphabetNoRepeat(dst[offset:], dict, bits, currentProvider())
+	fillBatchedNoRepeat(dst[offset:], alphabetData(alphabet), currentProvider())
 	return dst
 }
 
@@ -171,71 +204,103 @@ func appendCustom[B ~string | ~[]byte](dst []byte, dictionary B, length int) []b
 	}
 	offset := len(dst)
 	dst = slices.Grow(dst, length)[:offset+length]
-	fillAlphabetNoRepeat(dst[offset:], dictionary, 0, currentProvider())
+	out := dst[offset:]
+	p := currentProvider()
+	if len(dictionary) <= 256 {
+		fillBatchedNoRepeat(out, dictionary, p)
+	} else {
+		fillWideNoRepeat(out, dictionary, p)
+	}
 	return dst
 }
 
-// fillAlphabetNoRepeat fills out with characters from dict ensuring no two adjacent characters are identical.
-func fillAlphabetNoRepeat[S ~string | ~[]byte](out []byte, dict S, bits uint8, provider Provider) {
+// skipPast returns 1 when idx >= lastIdx and 0 otherwise, without a branch:
+// the outcome is a coin flip, so a conditional jump would mispredict half
+// the time. Both arguments are below 2^63.
+func skipPast(idx, lastIdx uint64) uint64 {
+	return uint64(int64(lastIdx-1-idx)>>63) & 1
+}
+
+// fillBatchedNoRepeat fills out with symbols from a dict of at most 256
+// bytes so that no two adjacent bytes are equal. The first symbol is drawn
+// uniformly from all n positions; every later symbol draws a position from
+// n-1 candidates and shifts it past the previous position, a bijection onto
+// the other positions, so unique dictionaries never retry. A dictionary with
+// repeated bytes keeps its weighting: positions holding the previous byte are
+// skipped, leaving every other position equally likely. Positions come in
+// batches of up to batchSpecs[n-1].k per random word; a rejected word
+// restores the state from before its batch and is redrawn.
+func fillBatchedNoRepeat[S ~string | ~[]byte](out []byte, dict S, p Provider) {
+	if len(out) == 0 {
+		return
+	}
+	n := uint64(len(dict))
+	lastIdx := boundedFrom(p.Sum64(), n, p)
+	last := dict[lastIdx]
+	out[0] = last
+	if len(out) == 1 || n < 2 {
+		return
+	}
 	var (
-		raw   uint64
-		avail uint8
-		last  byte
+		n1    = n - 1
+		batch = int(batchSpecs[n1].k)
+		fast  = isRuntime(p)
 	)
-	if bits > 0 {
-		mask := uint64((1 << bits) - 1)
-		for i := 0; i < len(out); {
-			if avail < bits {
-				raw = provider.Sum64()
-				avail = 64
-			}
-			c := dict[int(raw&mask)]
-			raw >>= bits
-			avail -= bits
-			if i > 0 && c == last {
+	for i := 1; i < len(out); {
+		var lo uint64
+		if fast {
+			lo = runtimeRand()
+		} else {
+			lo = p.Sum64()
+		}
+		var (
+			start                    = i
+			saveLast, saveIdx        = last, lastIdx
+			prod              uint64 = 1
+		)
+		for d := 0; d < batch && i < len(out); d++ {
+			var hi uint64
+			hi, lo = bits.Mul64(lo, n1)
+			prod *= n1
+			idx := hi + skipPast(hi, lastIdx)
+			c := dict[idx]
+			if c == last {
 				continue
 			}
 			out[i] = c
-			last = c
+			last, lastIdx = c, idx
 			i++
 		}
-		return
-	}
-	dn := len(dict)
-	if dn == 0 {
-		return
-	}
-	if dn > 256 {
-		limit := uint64(dn)
-		for i := 0; i < len(out); {
-			c := dict[int(uniformUint64n(limit, provider))]
-			if i > 0 && c == last {
-				continue
-			}
-			out[i] = c
-			last = c
-			i++
+		if lo < prod && lo < -prod%prod {
+			last, lastIdx = saveLast, saveIdx
+			i = start
 		}
-		return
 	}
-	cutoff := (256 / dn) * dn
+}
+
+// fillWideNoRepeat fills out from any dictionary so that no two adjacent
+// bytes are equal, sampling each position with [boundedFrom] and retrying a
+// position whose byte equals the previous byte; that keeps the weighting of
+// dictionaries with repeated bytes, which the batched sampler cannot.
+func fillWideNoRepeat[S ~string | ~[]byte](out []byte, dict S, p Provider) {
+	var (
+		last    byte
+		lastIdx uint64
+		n       = uint64(len(dict))
+	)
 	for i := 0; i < len(out); {
-		if avail < 8 {
-			raw = provider.Sum64()
-			avail = 64
+		var idx uint64
+		if i == 0 {
+			idx = boundedFrom(p.Sum64(), n, p)
+		} else {
+			idx = boundedFrom(p.Sum64(), n-1, p)
+			idx += skipPast(idx, lastIdx)
+			if dict[idx] == last {
+				continue
+			}
 		}
-		v := int(uint8(raw))
-		raw >>= 8
-		avail -= 8
-		if v >= cutoff {
-			continue
-		}
-		c := dict[v%dn]
-		if i > 0 && c == last {
-			continue
-		}
-		out[i] = c
-		last = c
+		out[i] = dict[idx]
+		last, lastIdx = dict[idx], idx
 		i++
 	}
 }
